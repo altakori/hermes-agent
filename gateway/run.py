@@ -22565,7 +22565,27 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
 
         if adapter is None:
             return
-        topic_name = self._sanitize_telegram_topic_title(title)
+        topic_title = str(title or "")
+        try:
+            from tools.approval import is_session_yolo_enabled
+
+            session_key = self._session_key_for_source(source)
+            if is_session_yolo_enabled(session_key):
+                # Normalize any user-supplied marker spelling and collapse
+                # repeats so the visible state indicator is always exact and
+                # idempotent: ``(yolo)Title``.
+                topic_title = re.sub(
+                    r"^(?:(?:\(yolo\))\s*)+",
+                    "",
+                    topic_title.lstrip(),
+                    flags=re.IGNORECASE,
+                ).lstrip()
+                topic_title = f"(yolo){topic_title}"
+        except Exception:
+            # A title rename is best-effort. If approval-state lookup ever
+            # fails, keep the ordinary topic title rather than skipping it.
+            logger.debug("Failed to read YOLO state for Telegram topic title", exc_info=True)
+        topic_name = self._sanitize_telegram_topic_title(topic_title)
         try:
             rename_topic = getattr(adapter, "rename_dm_topic", None)
             if rename_topic is not None:

@@ -4,6 +4,7 @@ Topic mode makes the root Telegram DM a system lobby while user-created
 Telegram topics act as independent Hermes session lanes.
 """
 
+import asyncio
 from datetime import datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
@@ -618,6 +619,252 @@ async def test_auto_generated_title_renames_bound_telegram_topic(tmp_path):
         thread_id="42",
         name="Build Telegram Topic UX",
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("title", "expected"),
+    [
+        ("Build Telegram Topic UX", "(yolo)Build Telegram Topic UX"),
+        ("(yolo)Build Telegram Topic UX", "(yolo)Build Telegram Topic UX"),
+        ("(YOLO)Build Telegram Topic UX", "(yolo)Build Telegram Topic UX"),
+        ("(yolo)(YOLO)Build Telegram Topic UX", "(yolo)Build Telegram Topic UX"),
+        (
+            "  (YOLO)  (yolo)\tBuild Telegram Topic UX",
+            "(yolo)Build Telegram Topic UX",
+        ),
+    ],
+)
+async def test_auto_title_marks_yolo_enabled_telegram_topic(tmp_path, title, expected):
+    from tools.approval import disable_session_yolo, enable_session_yolo
+
+    db = SessionDB(db_path=tmp_path / "state.db")
+    db.enable_telegram_topic_mode(chat_id="208214988", user_id="208214988")
+    db.create_session(
+        session_id="sess-topic",
+        source="telegram",
+        user_id="208214988",
+    )
+    source = _make_source(thread_id="42")
+    session_key = build_session_key(source)
+    db.bind_telegram_topic(
+        chat_id="208214988",
+        thread_id="42",
+        user_id="208214988",
+        session_key=session_key,
+        session_id="sess-topic",
+    )
+    runner = _make_runner(session_db=db)
+    runner._telegram_topic_mode_enabled = lambda _source: True
+
+    enable_session_yolo(session_key)
+    try:
+        await runner._rename_telegram_topic_for_session_title(
+            source,
+            "sess-topic",
+            title,
+        )
+    finally:
+        disable_session_yolo(session_key)
+
+    runner.adapters[Platform.TELEGRAM].rename_dm_topic.assert_awaited_once_with(
+        chat_id="208214988",
+        thread_id="42",
+        name=expected,
+    )
+
+
+@pytest.mark.asyncio
+async def test_yolo_toggle_renames_adapter_on_enable_and_disable(tmp_path):
+    from tools.approval import disable_session_yolo
+
+    db = SessionDB(db_path=tmp_path / "state.db")
+    db.enable_telegram_topic_mode(chat_id="208214988", user_id="208214988")
+    db.create_session(
+        session_id="sess-topic",
+        source="telegram",
+        user_id="208214988",
+    )
+    db.set_session_title("sess-topic", "Current Topic")
+    source = _make_source(thread_id="42")
+    session_key = build_session_key(source)
+    db.bind_telegram_topic(
+        chat_id=source.chat_id,
+        thread_id=source.thread_id,
+        user_id=source.user_id,
+        session_key=session_key,
+        session_id="sess-topic",
+    )
+    runner = _make_runner(session_db=db)
+    runner._telegram_topic_mode_enabled = lambda _source: True
+    runner._gateway_loop = asyncio.get_running_loop()
+    adapter = runner.adapters[Platform.TELEGRAM]
+
+    enabled = asyncio.Event()
+    adapter.rename_dm_topic.side_effect = lambda **_kwargs: enabled.set()
+    try:
+        result = await runner._handle_yolo_command(_make_event("/yolo", thread_id="42"))
+        await asyncio.wait_for(enabled.wait(), timeout=1)
+        assert "ON" in result
+        assert adapter.rename_dm_topic.await_args.kwargs["name"] == "(yolo)Current Topic"
+
+        disabled = asyncio.Event()
+        adapter.rename_dm_topic.side_effect = lambda **_kwargs: disabled.set()
+        result = await runner._handle_yolo_command(_make_event("/yolo", thread_id="42"))
+        await asyncio.wait_for(disabled.wait(), timeout=1)
+        assert "OFF" in result
+        assert adapter.rename_dm_topic.await_args.kwargs["name"] == "Current Topic"
+    finally:
+        disable_session_yolo(session_key)
+
+
+@pytest.mark.asyncio
+async def test_yolo_title_marker_is_isolated_per_topic(tmp_path):
+    from tools.approval import disable_session_yolo, enable_session_yolo
+
+    db = SessionDB(db_path=tmp_path / "state.db")
+    db.enable_telegram_topic_mode(chat_id="208214988", user_id="208214988")
+    source_a = _make_source(thread_id="42")
+    source_b = _make_source(thread_id="43")
+    for source, session_id in ((source_a, "sess-a"), (source_b, "sess-b")):
+        db.create_session(
+            session_id=session_id,
+            source="telegram",
+            user_id=source.user_id,
+        )
+        db.bind_telegram_topic(
+            chat_id=source.chat_id,
+            thread_id=source.thread_id,
+            user_id=source.user_id,
+            session_key=build_session_key(source),
+            session_id=session_id,
+        )
+    runner = _make_runner(session_db=db)
+    runner._telegram_topic_mode_enabled = lambda _source: True
+    session_key_a = build_session_key(source_a)
+
+    enable_session_yolo(session_key_a)
+    try:
+        await runner._rename_telegram_topic_for_session_title(source_a, "sess-a", "A")
+        await runner._rename_telegram_topic_for_session_title(source_b, "sess-b", "B")
+    finally:
+        disable_session_yolo(session_key_a)
+
+    names = [call.kwargs["name"] for call in runner.adapters[Platform.TELEGRAM].rename_dm_topic.await_args_list]
+    assert names == ["(yolo)A", "B"]
+
+
+@pytest.mark.asyncio
+async def test_yolo_topic_title_sanitizes_long_unicode_whitespace(tmp_path):
+    from tools.approval import disable_session_yolo, enable_session_yolo
+
+    db = SessionDB(db_path=tmp_path / "state.db")
+    db.enable_telegram_topic_mode(chat_id="208214988", user_id="208214988")
+    db.create_session(session_id="sess-topic", source="telegram", user_id="208214988")
+    source = _make_source(thread_id="42")
+    session_key = build_session_key(source)
+    db.bind_telegram_topic(
+        chat_id=source.chat_id,
+        thread_id=source.thread_id,
+        user_id=source.user_id,
+        session_key=session_key,
+        session_id="sess-topic",
+    )
+    runner = _make_runner(session_db=db)
+    runner._telegram_topic_mode_enabled = lambda _source: True
+
+    enable_session_yolo(session_key)
+    try:
+        await runner._rename_telegram_topic_for_session_title(
+            source,
+            "sess-topic",
+            "  한글\n\t제목  " * 40,
+        )
+    finally:
+        disable_session_yolo(session_key)
+
+    name = runner.adapters[Platform.TELEGRAM].rename_dm_topic.await_args.kwargs["name"]
+    assert name.startswith("(yolo)한글 제목")
+    assert "\n" not in name and "\t" not in name
+    assert len(name) <= 120
+
+
+@pytest.mark.asyncio
+async def test_yolo_topic_uses_direct_bot_fallback(tmp_path):
+    from tools.approval import disable_session_yolo, enable_session_yolo
+
+    db = SessionDB(db_path=tmp_path / "state.db")
+    db.enable_telegram_topic_mode(chat_id="208214988", user_id="208214988")
+    db.create_session(session_id="sess-topic", source="telegram", user_id="208214988")
+    source = _make_source(thread_id="42")
+    session_key = build_session_key(source)
+    db.bind_telegram_topic(
+        chat_id=source.chat_id,
+        thread_id=source.thread_id,
+        user_id=source.user_id,
+        session_key=session_key,
+        session_id="sess-topic",
+    )
+    runner = _make_runner(session_db=db)
+    runner._telegram_topic_mode_enabled = lambda _source: True
+    adapter = runner.adapters[Platform.TELEGRAM]
+    adapter.rename_dm_topic = None
+    adapter._bot = SimpleNamespace(edit_forum_topic=AsyncMock())
+
+    enable_session_yolo(session_key)
+    try:
+        await runner._rename_telegram_topic_for_session_title(
+            source,
+            "sess-topic",
+            "Fallback",
+        )
+    finally:
+        disable_session_yolo(session_key)
+
+    adapter._bot.edit_forum_topic.assert_awaited_once_with(
+        chat_id=208214988,
+        message_thread_id=42,
+        name="(yolo)Fallback",
+    )
+
+
+@pytest.mark.asyncio
+async def test_yolo_topic_rename_schedules_from_worker_thread(tmp_path):
+    from tools.approval import disable_session_yolo, enable_session_yolo
+
+    db = SessionDB(db_path=tmp_path / "state.db")
+    db.enable_telegram_topic_mode(chat_id="208214988", user_id="208214988")
+    db.create_session(session_id="sess-topic", source="telegram", user_id="208214988")
+    source = _make_source(thread_id="42")
+    session_key = build_session_key(source)
+    db.bind_telegram_topic(
+        chat_id=source.chat_id,
+        thread_id=source.thread_id,
+        user_id=source.user_id,
+        session_key=session_key,
+        session_id="sess-topic",
+    )
+    runner = _make_runner(session_db=db)
+    runner._telegram_topic_mode_enabled = lambda _source: True
+    runner._gateway_loop = asyncio.get_running_loop()
+    renamed = asyncio.Event()
+    runner.adapters[Platform.TELEGRAM].rename_dm_topic.side_effect = (
+        lambda **_kwargs: renamed.set()
+    )
+
+    enable_session_yolo(session_key)
+    try:
+        await asyncio.to_thread(
+            runner._schedule_telegram_topic_title_rename,
+            source,
+            "sess-topic",
+            "Worker",
+        )
+        await asyncio.wait_for(renamed.wait(), timeout=1)
+    finally:
+        disable_session_yolo(session_key)
+
+    assert runner.adapters[Platform.TELEGRAM].rename_dm_topic.await_args.kwargs["name"] == "(yolo)Worker"
 
 
 @pytest.mark.asyncio

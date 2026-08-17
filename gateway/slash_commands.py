@@ -3946,10 +3946,42 @@ class GatewaySlashCommandsMixin:
         current = is_session_yolo_enabled(session_key)
         if current:
             disable_session_yolo(session_key)
+            await self._refresh_telegram_topic_yolo_title(event.source)
             return EphemeralReply(t("gateway.yolo.disabled"))
         else:
             enable_session_yolo(session_key)
+            await self._refresh_telegram_topic_yolo_title(event.source)
             return EphemeralReply(t("gateway.yolo.enabled"))
+
+    async def _refresh_telegram_topic_yolo_title(self, source: SessionSource) -> None:
+        """Best-effort refresh of the visible topic title after ``/yolo``.
+
+        The normal Telegram rename lane derives the ``(yolo)`` marker from the
+        live session state. Re-scheduling the current DB title here makes the
+        marker appear or disappear immediately when the toggle changes.
+        """
+        try:
+            if not await asyncio.to_thread(self._is_telegram_topic_lane, source):
+                return
+            session_db = getattr(self, "_session_db", None)
+            schedule_rename = getattr(
+                self, "_schedule_telegram_topic_title_rename", None
+            )
+            if session_db is None or not callable(schedule_rename):
+                return
+            session_entry = await self.async_session_store.get_or_create_session(source)
+            title = await session_db.get_session_title(session_entry.session_id)
+            if title:
+                await asyncio.to_thread(
+                    schedule_rename,
+                    source,
+                    session_entry.session_id,
+                    title,
+                )
+        except Exception:
+            # Topic decoration is cosmetic and must never make the security
+            # toggle itself fail.
+            logger.debug("Failed to refresh Telegram topic title for /yolo", exc_info=True)
 
     async def _handle_verbose_command(self, event: MessageEvent) -> str:
         """Handle /verbose command — cycle tool progress display mode.
