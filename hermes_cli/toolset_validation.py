@@ -15,6 +15,47 @@ zero-tools end state) loudly turns that silent failure into an actionable one.
 from typing import Callable, List
 
 
+def find_unknown_startup_toolsets(
+    toolsets: object,
+    config: object,
+    is_valid_toolset: Callable[[str], bool],
+) -> List[str]:
+    """Return toolsets that are genuinely unknown during early startup.
+
+    Plugin and MCP discovery happens after the CLI constructs the agent, so
+    their live registry entries are not available to ``is_valid_toolset`` at
+    this point.  The config records both kinds of deferred names; accept those
+    while continuing to report entries that neither the registry nor config
+    knows about.
+    """
+    if not isinstance(toolsets, (list, tuple, set)):
+        return []
+
+    deferred_names = set()
+    if isinstance(config, dict):
+        mcp_servers = config.get("mcp_servers")
+        if isinstance(mcp_servers, dict):
+            deferred_names.update(
+                name for name in mcp_servers if isinstance(name, str) and name
+            )
+
+        known_plugins = config.get("known_plugin_toolsets")
+        if isinstance(known_plugins, dict):
+            for raw_names in known_plugins.values():
+                names = raw_names if isinstance(raw_names, list) else [raw_names]
+                deferred_names.update(
+                    name for name in names if isinstance(name, str) and name
+                )
+
+    return [
+        name
+        for name in toolsets
+        if isinstance(name, str)
+        and not is_valid_toolset(name)
+        and name not in deferred_names
+    ]
+
+
 def validate_platform_toolsets(
     platform_toolsets: object,
     is_valid_toolset: Callable[[str], bool],

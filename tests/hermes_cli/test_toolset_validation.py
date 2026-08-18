@@ -6,7 +6,10 @@ tool registry nor a running Hermes.
 
 import pytest
 
-from hermes_cli.toolset_validation import validate_platform_toolsets
+from hermes_cli.toolset_validation import (
+    find_unknown_startup_toolsets,
+    validate_platform_toolsets,
+)
 
 # A representative set of real toolset names. `hermes` is deliberately absent —
 # that is the corruption #38798 reported (`hermes-cli` rewritten to `hermes`).
@@ -44,6 +47,34 @@ def test_mixed_valid_and_invalid_flags_only_the_invalid():
     assert len(warnings) == 1
     assert "platform 'discord'" in warnings[0]
     assert "unknown toolset 'bogus'" in warnings[0]
+
+
+def test_startup_validation_accepts_configured_plugin_before_registry_load():
+    config = {
+        "known_plugin_toolsets": {
+            "cli": ["deep_ideation", "skillopt"],
+        },
+        "mcp_servers": {},
+    }
+
+    assert find_unknown_startup_toolsets(
+        ["terminal", "deep_ideation", "skillopt"],
+        config,
+        lambda name: name == "terminal",
+    ) == []
+
+
+def test_startup_validation_still_rejects_truly_unknown_toolset():
+    config = {
+        "known_plugin_toolsets": {"cli": ["deep_ideation"]},
+        "mcp_servers": {"docs": {}},
+    }
+
+    assert find_unknown_startup_toolsets(
+        ["deep_ideation", "docs", "bogus"],
+        config,
+        lambda _name: False,
+    ) == ["bogus"]
 
 
 
