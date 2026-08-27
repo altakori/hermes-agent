@@ -172,6 +172,11 @@ def build_plugins_parser(subparsers, *, cmd_plugins: Callable) -> None:
         action="store_true",
         help="Exit non-zero when validation reports an error",
     )
+    plugins_doctor.add_argument(
+        "--json",
+        action="store_true",
+        help="Print machine-readable diagnostics including readiness",
+    )
 
     plugins_pack = plugins_subparsers.add_parser(
         "pack",

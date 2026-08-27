@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import argparse
+import json
 from pathlib import Path
+
+import pytest
 
 from hermes_cli.subcommands.plugins import build_plugins_parser
 
@@ -14,13 +17,94 @@ def _parse_plugins_args(*argv: str):
 
 
 def test_plugins_parser_exposes_doctor() -> None:
-    doctor = _parse_plugins_args("doctor", "sample", "--ci")
+    doctor = _parse_plugins_args("doctor", "sample", "--ci", "--json")
 
-    assert (doctor.plugins_action, doctor.target, doctor.ci) == (
+    assert (doctor.plugins_action, doctor.target, doctor.ci, doctor.json) == (
         "doctor",
         "sample",
         True,
+        True,
     )
+
+
+def test_doctor_readiness_is_derived_from_current_report() -> None:
+    from hermes_cli.plugin_dev import DoctorReport
+
+    manifest = type(
+        "Manifest",
+        (),
+        {"name": "sample", "version": "1.0.0", "kind": "standalone"},
+    )()
+    unknown = DoctorReport(Path("unknown"))
+    ready = DoctorReport(Path("ready"), manifest=manifest)
+    degraded = DoctorReport(Path("degraded"), manifest=manifest)
+    degraded.warning("advisory mismatch")
+    unavailable = DoctorReport(Path("unavailable"), manifest=manifest)
+    unavailable.error("registration failed")
+
+    assert unknown.readiness == "unknown"
+    assert ready.readiness == "ready"
+    assert degraded.readiness == "degraded"
+    assert unavailable.readiness == "unavailable"
+    assert unavailable.to_dict()["findings"] == [
+        {"level": "error", "message": "registration failed"}
+    ]
+
+
+def test_plugin_doctor_json_reports_diagnostic_readiness(monkeypatch, capsys) -> None:
+    from hermes_cli import plugins_cmd
+    from hermes_cli.plugin_dev import DoctorReport
+
+    report = DoctorReport(Path("sample"), manifest=type(
+        "Manifest",
+        (),
+        {"name": "sample", "version": "1.2.3", "kind": "standalone"},
+    )())
+    report.warning("declared tool was not registered")
+
+    def noisy_doctor(target):
+        print("PLUGIN-IMPORT-NOISE")
+        return report
+
+    monkeypatch.setattr("hermes_cli.plugin_dev.doctor_plugin", noisy_doctor)
+
+    plugins_cmd.cmd_plugin_doctor("sample", json_output=True)
+
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+    assert captured.err == "PLUGIN-IMPORT-NOISE\n"
+    assert payload["readiness"] == "degraded"
+    assert payload["ok"] is True
+    assert payload["manifest"] == {
+        "name": "sample",
+        "version": "1.2.3",
+        "kind": "standalone",
+    }
+
+
+def test_plugin_doctor_ci_preserves_error_only_exit_gate(monkeypatch, capsys) -> None:
+    from hermes_cli import plugins_cmd
+    from hermes_cli.plugin_dev import DoctorReport
+
+    degraded = DoctorReport(Path("degraded"), manifest=type(
+        "Manifest",
+        (),
+        {"name": "degraded", "version": "1.0.0", "kind": "standalone"},
+    )())
+    degraded.warning("advisory")
+    monkeypatch.setattr("hermes_cli.plugin_dev.doctor_plugin", lambda target: degraded)
+
+    plugins_cmd.cmd_plugin_doctor("degraded", ci=True, json_output=True)
+    assert json.loads(capsys.readouterr().out)["readiness"] == "degraded"
+
+    unavailable = DoctorReport(Path("unavailable"))
+    unavailable.error("cannot load")
+    monkeypatch.setattr("hermes_cli.plugin_dev.doctor_plugin", lambda target: unavailable)
+
+    with pytest.raises(SystemExit) as exit_info:
+        plugins_cmd.cmd_plugin_doctor("unavailable", ci=True, json_output=True)
+    assert exit_info.value.code == 1
+    assert json.loads(capsys.readouterr().out)["readiness"] == "unavailable"
 
 
 def test_doctor_uses_registration_to_reject_bad_hook_and_callback_signature(
