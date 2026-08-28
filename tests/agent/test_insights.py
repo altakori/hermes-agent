@@ -299,13 +299,15 @@ class TestInsightsPopulated:
             ("exec-1", 4, ""),
             ("exec-2", 0, ""),
             ("exec-3", 2, "\n\n[Subdirectory context discovered]"),
+            ("exec-failed", 5, ""),
         ):
             db.append_message(
                 "opt", role="tool", tool_name="execute_code",
                 tool_call_id=call_id,
                 content=(
                     json.dumps({
-                        "status": "success", "exit_code": 0,
+                        "status": "error" if call_id == "exec-failed" else "success",
+                        "exit_code": 1 if call_id == "exec-failed" else 0,
                         "tool_calls_made": calls,
                     }) + suffix
                 ),
@@ -318,7 +320,9 @@ class TestInsightsPopulated:
         assert efficiency["cache_read_ratio_pct"] == pytest.approx(90.0)
         assert efficiency["uncached_input_per_api_call"] == pytest.approx(50.0)
         assert efficiency["cache_read_per_api_call"] == pytest.approx(450.0)
-        assert efficiency["code_mode"]["executions"] == 3
+        assert efficiency["code_mode"]["executions"] == 4
+        assert efficiency["code_mode"]["successful_executions"] == 3
+        assert efficiency["code_mode"]["failed_executions"] == 1
         assert efficiency["code_mode"]["inner_tool_calls"] == 6
         assert efficiency["code_mode"]["estimated_model_turns_avoided"] == 4
 
@@ -350,6 +354,36 @@ class TestInsightsPopulated:
 
         assert behavior["counts"] == {"true": 1, "false": 1, "n/a": 1}
         assert behavior["evaluated_sessions"] == 3
+
+    def test_behavior_recent_failures_are_newest_first(self, db):
+        for index in range(6):
+            session_id = f"failure-{index}"
+            db.create_session(session_id=session_id, source="telegram", model="model-a")
+            db.append_message(
+                session_id, role="assistant",
+                tool_calls=[{
+                    "id": f"write-{index}",
+                    "function": {
+                        "name": "write_file",
+                        "arguments": json.dumps({"path": f"src/app_{index}.py"}),
+                    },
+                }],
+            )
+            db.append_message(
+                session_id, role="tool", tool_name="write_file",
+                tool_call_id=f"write-{index}", content='{"verified":true}',
+            )
+        db._conn.commit()
+
+        failures = InsightsEngine(db).generate(days=30)["behavior_evals"][
+            "code-change-verification"
+        ]["recent_failures"]
+        event_ids = [
+            item["evidence"]["last_mutation"]["message_id"] for item in failures
+        ]
+
+        assert len(event_ids) == 5
+        assert event_ids == sorted(event_ids, reverse=True)
 
 
 
@@ -424,6 +458,38 @@ class TestInsightsPopulated:
         # Percentages should sum to ~100%
         total_pct = sum(t["percentage"] for t in tools)
         assert total_pct == pytest.approx(100.0, abs=0.1)
+
+    def test_tool_usage_deduplicates_ids_and_keeps_assistant_only_calls(self, db):
+        db.create_session(session_id="mixed", source="telegram", model="model-a")
+        calls = []
+        for call_id in ("r1", "r2", "r3", "assistant-only"):
+            calls.append({
+                "id": call_id,
+                "function": {"name": "terminal", "arguments": "{}"},
+            })
+        db.append_message("mixed", role="assistant", tool_calls=calls)
+        for call_id in ("r1", "r2", "r3"):
+            db.append_message(
+                "mixed", role="tool", tool_name="terminal",
+                tool_call_id=call_id, content='{"exit_code":0}',
+            )
+        db.create_session(session_id="legacy", source="telegram", model="model-a")
+        db.append_message(
+            "legacy", role="assistant",
+            tool_calls=[{
+                "id": "legacy-call",
+                "function": {"name": "terminal", "arguments": "{}"},
+            }],
+        )
+        db.append_message(
+            "legacy", role="tool", tool_name="terminal",
+            tool_call_id=None, content='{"exit_code":0}',
+        )
+        db._conn.commit()
+
+        usage = InsightsEngine(db)._get_tool_usage(0.0)
+        terminal = next(row for row in usage if row["tool_name"] == "terminal")
+        assert terminal["count"] == 5
 
     def test_skill_breakdown(self, populated_db):
         engine = InsightsEngine(populated_db)

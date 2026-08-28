@@ -124,8 +124,9 @@ def _mutation_succeeded(content: Any) -> bool:
         if "verified" in payload:
             return payload.get("verified") is True
         return payload.get("success") is True or payload.get("status") == "success"
-    text = str(content or "").lower()
-    return "error" not in text and "failed" not in text
+    # Behavior scoring is evidence-driven: arbitrary prose is not a
+    # structured success signal and must not make the behavior applicable.
+    return False
 
 
 def _terminal_succeeded(content: Any) -> bool:

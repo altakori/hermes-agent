@@ -316,80 +316,88 @@ class InsightsEngine:
         return [dict(row) for row in cursor.fetchall()]
 
     def _get_tool_usage(self, cutoff: float, source: str = None) -> List[Dict]:
-        """Get tool call counts from messages.
+        """Get deduplicated tool-call counts from persisted trace evidence.
 
-        Uses two sources:
-        1. tool_name column on 'tool' role messages (set by gateway)
-        2. tool_calls JSON on 'assistant' role messages (covers CLI where
-           tool_name is not populated on tool responses)
+        Tool results and assistant call records often describe the same call. We
+        deduplicate rows by ``(session_id, tool_call_id)`` when an ID exists,
+        then use the larger source count only for legacy ID-less rows where
+        overlap cannot be established safely.
         """
-        tool_counts = Counter()
-
-        # Source 1: explicit tool_name on tool response messages
+        response_by_id: Dict[tuple[str, str], str] = {}
+        response_idless = Counter()
+        sql = (
+            "SELECT m.session_id, m.tool_name, m.tool_call_id FROM messages m "
+            "JOIN sessions s ON s.id = m.session_id "
+            "WHERE s.started_at >= ? AND m.role = 'tool' "
+            "AND m.tool_name IS NOT NULL"
+        )
+        params: tuple[Any, ...] = (cutoff,)
         if source:
-            cursor = self._conn.execute(
-                """SELECT m.tool_name, COUNT(*) as count
-                   FROM messages m
-                   JOIN sessions s ON s.id = m.session_id
-                   WHERE s.started_at >= ? AND s.source = ?
-                     AND m.role = 'tool' AND m.tool_name IS NOT NULL
-                   GROUP BY m.tool_name
-                   ORDER BY count DESC""",
-                (cutoff, source),
-            )
-        else:
-            cursor = self._conn.execute(
-                """SELECT m.tool_name, COUNT(*) as count
-                   FROM messages m
-                   JOIN sessions s ON s.id = m.session_id
-                   WHERE s.started_at >= ?
-                     AND m.role = 'tool' AND m.tool_name IS NOT NULL
-                   GROUP BY m.tool_name
-                   ORDER BY count DESC""",
-                (cutoff,),
-            )
-        for row in cursor.fetchall():
-            tool_counts[row["tool_name"]] += row["count"]
+            sql += " AND s.source = ?"
+            params = (cutoff, source)
+        for row in self._conn.execute(sql, params).fetchall():
+            name = row["tool_name"]
+            call_id = str(row["tool_call_id"] or "")
+            if call_id:
+                response_by_id[(row["session_id"], call_id)] = name
+            else:
+                response_idless[name] += 1
 
-        # Source 2: extract from tool_calls JSON on assistant messages
-        # (covers CLI sessions where tool_name is NULL on tool responses)
+        assistant_by_id: Dict[tuple[str, str], str] = {}
+        assistant_idless = Counter()
+        assistant_sql = (
+            "SELECT m.session_id, m.tool_calls FROM messages m"
+            f" INDEXED BY {self._MESSAGES_ASSISTANT_CALLS_INDEX}"
+            " JOIN sessions s ON s.id = m.session_id"
+            " WHERE s.started_at >= ? AND m.role = 'assistant'"
+            " AND m.tool_calls IS NOT NULL"
+        ) if self._has_assistant_calls_index else (
+            "SELECT m.session_id, m.tool_calls FROM messages m"
+            " JOIN sessions s ON s.id = m.session_id"
+            " WHERE s.started_at >= ? AND m.role = 'assistant'"
+            " AND m.tool_calls IS NOT NULL"
+        )
+        assistant_params: tuple[Any, ...] = (cutoff,)
         if source:
-            cursor2 = self._conn.execute(
-                self._GET_TOOL_CALLS_WITH_SOURCE, (cutoff, source)
-            )
-        else:
-            cursor2 = self._conn.execute(self._GET_TOOL_CALLS_ALL, (cutoff,))
-
-        tool_calls_counts = Counter()
-        for row in cursor2.fetchall():
+            assistant_sql += " AND s.source = ?"
+            assistant_params = (cutoff, source)
+        for row in self._conn.execute(assistant_sql, assistant_params).fetchall():
             try:
                 calls = row["tool_calls"]
                 if isinstance(calls, str):
                     calls = json.loads(calls)
-                if isinstance(calls, list):
-                    for call in calls:
-                        func = call.get("function", {}) if isinstance(call, dict) else {}
-                        name = func.get("name")
-                        if name:
-                            tool_calls_counts[name] += 1
-            except (json.JSONDecodeError, TypeError, AttributeError):
+                if not isinstance(calls, list):
+                    continue
+            except (json.JSONDecodeError, TypeError):
                 continue
+            for call in calls:
+                if not isinstance(call, dict):
+                    continue
+                func = call.get("function", {})
+                name = func.get("name") if isinstance(func, dict) else None
+                if not name:
+                    continue
+                call_id = str(call.get("id") or call.get("call_id") or "")
+                if call_id:
+                    assistant_by_id[(row["session_id"], call_id)] = name
+                else:
+                    assistant_idless[name] += 1
 
-        # Merge: prefer tool_name source, supplement with tool_calls source
-        # for tools not already counted
-        if not tool_counts and tool_calls_counts:
-            # No tool_name data at all — use tool_calls exclusively
-            tool_counts = tool_calls_counts
-        elif tool_counts and tool_calls_counts:
-            # Both sources have data — use whichever has the higher count per tool
-            # (they may overlap, so take the max to avoid double-counting)
-            all_tools = set(tool_counts) | set(tool_calls_counts)
-            merged = Counter()
-            for tool in all_tools:
-                merged[tool] = max(tool_counts.get(tool, 0), tool_calls_counts.get(tool, 0))
-            tool_counts = merged
+        known_calls = dict(response_by_id)
+        for key, name in assistant_by_id.items():
+            known_calls.setdefault(key, name)
+        known_counts = Counter(known_calls.values())
+        response_totals = Counter(response_by_id.values()) + response_idless
+        assistant_totals = Counter(assistant_by_id.values()) + assistant_idless
+        tool_counts = Counter()
+        for name in set(known_counts) | set(response_totals) | set(assistant_totals):
+            # For ID-less legacy rows overlap is unknowable. The maximum of
+            # known-union and either complete source avoids both double-counting
+            # an ID-less mirror and dropping an assistant-only identified call.
+            tool_counts[name] = max(
+                known_counts[name], response_totals[name], assistant_totals[name]
+            )
 
-        # Convert to the expected format
         return [
             {"tool_name": name, "count": count}
             for name, count in tool_counts.most_common()
@@ -506,6 +514,8 @@ class InsightsEngine:
         """Summarize execute_code's structured inner-tool-call evidence."""
         session_rows = sessions or self._get_sessions(cutoff, source)
         executions = 0
+        successful_executions = 0
+        failed_executions = 0
         inner_tool_calls = 0
         estimated_model_turns_avoided = 0
         for session_ids in self._session_id_chunks(session_rows):
@@ -528,6 +538,17 @@ class InsightsEngine:
                 if not isinstance(payload, dict):
                     payload = {}
                 executions += 1
+                exit_code = payload.get("exit_code", payload.get("returncode"))
+                status = str(payload.get("status") or "").lower()
+                try:
+                    exit_ok = exit_code is None or int(exit_code) == 0
+                except (TypeError, ValueError):
+                    exit_ok = False
+                succeeded = status == "success" and exit_ok and not payload.get("error")
+                if not succeeded:
+                    failed_executions += 1
+                    continue
+                successful_executions += 1
                 try:
                     calls = max(0, int(payload.get("tool_calls_made") or 0))
                     inner_tool_calls += calls
@@ -536,6 +557,8 @@ class InsightsEngine:
                     continue
         return {
             "executions": executions,
+            "successful_executions": successful_executions,
+            "failed_executions": failed_executions,
             "inner_tool_calls": inner_tool_calls,
             # Estimate, not billing fact: each additional inner call would
             # otherwise require another agent/tool round trip in the common
@@ -622,16 +645,24 @@ class InsightsEngine:
             verdict = result["result"]
             counts[verdict] += 1
             if verdict == "false":
+                mutation = result["evidence"].get("last_mutation") or {}
                 failures.append({
                     "session_id": session_id,
                     "reason": result["reason"],
                     "evidence": result["evidence"],
+                    "_event_id": mutation.get("message_id", -1),
                 })
+        failures.sort(key=lambda item: item["_event_id"], reverse=True)
+        recent_failures = []
+        for failure in failures[:5]:
+            failure = dict(failure)
+            failure.pop("_event_id", None)
+            recent_failures.append(failure)
         return {
             "code-change-verification": {
                 "counts": counts,
                 "evaluated_sessions": sum(counts.values()),
-                "recent_failures": failures[-5:],
+                "recent_failures": recent_failures,
             }
         }
 
@@ -1223,7 +1254,8 @@ class InsightsEngine:
                 f"Cache read/API call: {efficiency.get('cache_read_per_api_call', 0.0):,.1f}"
             )
             lines.append(
-                f"  Code mode:         {code_mode.get('executions', 0):,} executions / "
+                f"  Code mode:         {code_mode.get('successful_executions', 0):,} success / "
+                f"{code_mode.get('failed_executions', 0):,} failed / "
                 f"{code_mode.get('inner_tool_calls', 0):,} inner calls / "
                 f"~{code_mode.get('estimated_model_turns_avoided', 0):,} turns avoided"
             )
@@ -1390,7 +1422,8 @@ class InsightsEngine:
         if efficiency:
             code_mode = efficiency.get("code_mode", {})
             lines.append(
-                f"**Code mode:** {code_mode.get('executions', 0):,} executions | "
+                f"**Code mode:** {code_mode.get('successful_executions', 0):,} success / "
+                f"{code_mode.get('failed_executions', 0):,} failed | "
                 f"{code_mode.get('inner_tool_calls', 0):,} inner calls | "
                 f"~{code_mode.get('estimated_model_turns_avoided', 0):,} turns avoided"
             )
