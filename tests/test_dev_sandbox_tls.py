@@ -32,6 +32,8 @@ def test_node_trusts_the_same_mitm_ca_as_other_sandbox_clients():
     stage1 = _STAGE1.read_text(encoding="utf-8")
     assert 'root/certs/ca.pem" "$SANDBOX_ROOT/root/certs/real-ca.pem"' in stage1
     assert '> "$SANDBOX_ROOT/root/certs/client-ca.pem"' in stage1
+    assert 'NODE_DIR="${DEV_SANDBOX_NODE_DIR:-}"' in stage1
+    assert 'NODE_DIR="$(dirname "$(dirname "$(command -v node)")")"' not in stage1
 
 
 def test_https_hosts_without_fixtures_use_a_connect_tunnel(tmp_path, monkeypatch):
