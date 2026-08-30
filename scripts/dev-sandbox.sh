@@ -444,6 +444,12 @@ if [ ! -f "$SANDBOX_ROOT/root/certs/ca.pem" ]; then
     exit 1
   fi
 fi
+# Clients see both kinds of HTTPS connection: fixture hosts are intercepted
+# with the throwaway sandbox CA, while fixtureless hosts use a raw CONNECT
+# tunnel and present their public certificate. Trust both without giving the
+# proxy's upstream verifier the private sandbox CA.
+cat "$SANDBOX_ROOT/root/certs/ca.pem" "$SANDBOX_ROOT/root/certs/real-ca.pem" \
+  > "$SANDBOX_ROOT/root/certs/client-ca.pem"
 GIT_UPLOAD_PACK="$(command -v git-upload-pack)"
 sed "s|@GIT_UPLOAD_PACK@|$GIT_UPLOAD_PACK|" "$SANDBOX_ASSETS/ssh-shim.sh" \
   > "$SANDBOX_ROOT/root/usr/bin/ssh"
