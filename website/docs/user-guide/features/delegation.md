@@ -56,7 +56,7 @@ delegate_task(
 )
 ```
 
-The subagent receives a focused system prompt built from your goal and context, instructing it to complete the task and provide a structured summary of what it did, what it found, any files modified, and any issues encountered.
+The subagent receives a focused system prompt built from your goal and context. The prompt asks its final response to use a compact handoff packet: status, outcome, workspace/revision, verified evidence, changes, failures, ruled-out approaches, open risks, and the next verification. It also tells the child to omit empty fields, preserve exact identifiers, paths, commands, and errors, and avoid replaying the full intermediate trajectory. The parent still receives the child's final response verbatim and must verify consequential claims.
 
 ## Practical Examples
 
@@ -189,6 +189,12 @@ delegation:
 ```
 
 Resolution order: `delegation.base_url` (direct endpoint) takes precedence, then `delegation.provider` (full credential bundle resolved via the runtime provider system), and when neither is set children inherit the parent's provider and credentials; `delegation.model` applies in all cases, and when it is empty children inherit the parent's model. Setting `delegation.provider` alongside `delegation.base_url` keeps the explicit endpoint but carries that provider's request overrides and max output tokens into the child. An explicit `delegation.request_overrides` dict is honored on every branch and merges over those runtime-derived values (see [Configuration](#configuration) below).
+
+### Escalation and retry handoff
+
+When a worker fails or needs a stronger retry, start a fresh child rather than copying its full transcript. Preserve the workspace or repository state, and pass a bounded packet containing the current goal, exact workspace/revision, verified facts, exact failure evidence, constraints, open risks, and the next verification. The receiving agent should inspect the live state and verify consequential claims itself. This keeps failed reasoning from becoming inherited context while retaining the artifacts needed to continue.
+
+For a planner-to-worker handoff, include the planner's accepted design decisions, constraints, and acceptance checks; those are part of the task contract, not disposable process history.
 
 Note that the pin is global: `delegate_task` has no per-task model parameter, so every child in a batch runs on the configured delegation model. For quality-sensitive subtasks that need a stronger model, either leave `delegation.model` unset for that session or hand the task to the [kanban board](kanban.md#per-task-model-override), which does support a per-task model override.
 

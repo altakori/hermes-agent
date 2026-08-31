@@ -1287,17 +1287,25 @@ def _build_child_system_prompt(
             )
     parts.append(
         "\nComplete this task using the tools available to you. "
-        "When finished, provide a clear, concise summary of:\n"
-        "- What you did\n"
-        "- What you found or accomplished\n"
-        "- Any files you created or modified\n"
-        "- Any issues encountered\n\n"
+        "When finished, return a compact handoff packet for the parent:\n"
+        "- Status: success, partial, blocked, or failed\n"
+        "- Outcome: what was accomplished\n"
+        "- Workspace state: exact path plus branch/revision and modified files when applicable\n"
+        "- Verified evidence: commands/checks actually run and their results\n"
+        "- Changes: files or external state created or modified\n"
+        "- Failures or blockers: exact failing command and error\n"
+        "- Ruled-out approaches: attempted options and why they were rejected\n"
+        "- Open risks: facts that remain unverified\n"
+        "- Next verification: the first concrete check the parent should run\n\n"
+        "Omit empty fields. Do not replay the full trajectory or pass along "
+        "unverified reasoning as fact. Preserve exact identifiers, paths, commands, "
+        "and error strings. Clearly separate verified facts from self-reported "
+        "outcomes that the parent must verify.\n\n"
         "Important workspace rule: Never assume a repository lives at /workspace/... or any other container-style path unless the task/context explicitly gives that path. "
         "If no exact local path is provided, discover it first before issuing git/workdir-specific commands.\n\n"
-        "Keep your final summary tight: lead with outcomes, prefer bullet "
-        "points over paragraphs, and don't replay your whole process. Your "
-        "response is returned to the parent agent as a summary, and overlong "
-        "summaries crowd out the parent's context window."
+        "Keep the packet tight: lead with status and outcome, prefer bullets over "
+        "paragraphs, and omit process narration. Your response is returned to the "
+        "parent agent, and overlong summaries crowd out the parent's context window."
     )
     if role == "orchestrator":
         child_note = (
@@ -5022,6 +5030,8 @@ def _build_top_level_description() -> str:
         "For external side effects (uploads, remote writes, publishing), "
         "require a verifiable handle (URL, ID, absolute path) and verify it "
         "yourself before telling the user the operation succeeded.\n"
+        "- For escalation or retry, spawn a fresh child with a bounded, verified "
+        "task packet plus workspace/revision; do not copy the prior transcript.\n"
         + restrictions_rule +
         "- Children inherit the parent model unless pinned via "
         "delegation.provider / delegation.model in config.yaml."
