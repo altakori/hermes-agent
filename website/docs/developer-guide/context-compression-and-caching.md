@@ -34,6 +34,21 @@ Configure via `hermes plugins` → Provider Plugins → Context Engine, or edit 
 
 For building a context engine plugin, see [Context Engine Plugins](/developer-guide/context-engine-plugin).
 
+### ContextPilot-lite shadow engine
+
+Hermes ships an opt-in `context_pilot_lite` engine for conservative experiments with agent-directed context operations:
+
+```yaml
+context:
+  engine: context_pilot_lite
+  engine_config:
+    mode: shadow  # shadow (default) | active
+```
+
+It wraps the built-in `ContextCompressor`, exposes one `context_manage` tool (`note`, `archive`, `compress`, `exclude`, `recall`), and defaults to **shadow mode**. Shadow mode records bounded proposals and metrics but returns `None` from `select_context()`, so the provider request and persisted transcript remain byte-for-byte unchanged. Active mode can inject bounded non-sensitive notes and request built-in compression; archive/exclude remain proposals until a typed structural verifier can prove that no tool pair or protected turn would be orphaned. It never deletes the session archive.
+
+Use `plugins/context_engine/context_pilot_lite/evaluator.py` for offline A/B gates. The evaluator fails candidates that lose required evidence without a verified recovery callback, regress task success, or create dangling tool-call/result structure. Redacted previews are not treated as exact recovery.
+
 ## Dual Compression System
 
 Hermes has two separate compression layers that operate independently:

@@ -1,0 +1,8 @@
+name: context_pilot_lite
+version: 0.1.0
+experimental: true
+opt_in: true
+description: "Experimental ContextPilot-lite shadow context engine; default shadow mode preserves prompts and transcript."
+hooks:
+  - select_context
+  - on_turn_complete

@@ -2003,6 +2003,23 @@ def _adopt_live_compression_child(
                 bind_state(session_db=session_db, session_id=child_session_id)
             except Exception:
                 pass
+    # Additive lifecycle edge for plugins that carry state across a
+    # compression-created child. In-place compression keeps its id.
+    try:
+        from hermes_cli.lifecycle import invoke_hook
+
+        invoke_hook(
+            "on_session_start",
+            session_id=child_session_id,
+            old_session_id=parent_session_id,
+            root_session_id=getattr(agent, "_root_session_id", None)
+            or parent_session_id,
+            boundary_reason="compression",
+            model=getattr(agent, "model", ""),
+            platform=getattr(agent, "platform", None) or "cli",
+        )
+    except Exception as exc:
+        logger.debug("plugin compression-child lifecycle hook failed: %s", exc)
     try:
         if agent._memory_manager:
             agent._memory_manager.on_session_switch(
@@ -2986,6 +3003,26 @@ def _notify_context_engine_compression_complete(
         )
     except Exception:
         logger.debug("relay segment rotation notification failed", exc_info=True)
+    try:
+        from hermes_cli.lifecycle import invoke_hook
+
+        invoke_hook(
+            "on_session_start",
+            session_id=new_session_id,
+            old_session_id=old_session_id,
+            root_session_id=getattr(agent, "_root_session_id", None)
+            or old_session_id,
+            boundary_reason="compression",
+            model=getattr(agent, "model", ""),
+            platform=getattr(agent, "platform", None) or "cli",
+            conversation_id=getattr(agent, "_gateway_session_key", None),
+        )
+    except Exception:
+        # Observer failure must not undo a committed compression.
+        logger.debug(
+            "plugin on_session_start (compression) failed",
+            exc_info=True,
+        )
     callback = getattr(agent.context_compressor, "on_session_start", None)
     if not callable(callback):
         return False

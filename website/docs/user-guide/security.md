@@ -21,6 +21,24 @@ The security model has eight layers:
 7. **Cross-session isolation** — sessions cannot access each other's data or state; cron job storage paths are hardened against path traversal attacks
 8. **Input sanitization** — working directory parameters in terminal tool backends are validated against an allowlist to prevent shell injection
 
+## Persistent Safety State and MCP Argument Egress
+
+The bundled `persistent-safety-guard` plugin is opt-in:
+
+```yaml
+plugins:
+  enabled:
+    - persistent-safety-guard
+```
+
+It keeps per-root-session risk flags, hashed denied-intent markers, hashed authorization scope/provenance with bounded expiry, and an irreversible-action budget outside the model transcript. Salted protected-context fingerprints and child-to-root bindings are persisted so separate worker processes inherit the same egress checks. State follows compression-created child sessions and delegated workers and does not decay automatically. Clearing requires an explicit `/safety-clear <root-session-id>` operation.
+
+The append-only event ledger uses a keyed hash chain and cross-process locking. Active enforcement state has a keyed integrity tag; state, tag, or salt mismatches fail closed for MCP egress. These files store bounded redacted metadata and salted fingerprints, not raw prompts, tool arguments, or secrets.
+
+For MCP tools, the `pre_tool_call` gate blocks high-confidence secret, sensitive-path, tool-inventory, and protected-context copies before the RPC. Context-copy checks apply to servers configured `trust: untrusted`; explicit secret patterns remain blocked for MCP tools at either trust level. Use `mcp_servers.<name>.tools.include` to expose only reviewed tool names. Detector output is a defense layer, not a substitute for MCP process isolation, egress policy, or human approval.
+
+Candidate MCP arguments up to 256 KiB are scanned across every fingerprint offset and every nested string leaf; larger untrusted arguments fail closed. Each turn distributes a bounded fingerprint sample across the current message and available history, while prior fingerprints are retained up to a 4,096-window per-root capacity. If that capacity is exhausted by genuinely new protected windows, untrusted MCP egress fails closed until explicit safety clearance. This covers full or long copied spans throughout the transcript, but short snippets between sampled windows remain a documented heuristic boundary rather than a guaranteed DLP match. A final marked MCP egress hook also runs in the executor path, so the internal `skip_pre_tool_call_hook` optimization cannot bypass this guard.
+
 ## Dangerous Command Approval
 
 Before executing any command, Hermes checks it against a curated list of dangerous patterns. If a match is found, the user must explicitly approve it.

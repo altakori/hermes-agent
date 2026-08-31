@@ -6868,6 +6868,36 @@ def _dispatch_pre_tool_call_hooks(
     return (block_msg, details.modified_args)
 
 
+def _dispatch_final_mcp_egress_hooks(
+    tool_name: str,
+    args: Optional[Dict[str, Any]],
+    *,
+    session_id: str = "",
+    tool_call_id: str = "",
+) -> Optional[str]:
+    """Run marked MCP egress guards even when the general hook was pre-fired."""
+    manager = get_plugin_manager()
+    callbacks = tuple(manager._hooks.get("pre_tool_call", ()))
+    for callback in callbacks:
+        if not getattr(callback, "__hermes_final_mcp_egress__", False):
+            continue
+        try:
+            result = callback(
+                tool_name=tool_name,
+                args=dict(args or {}),
+                session_id=session_id,
+                tool_call_id=tool_call_id,
+            )
+        except Exception:
+            return "persistent MCP egress guard failed closed"
+        if not isinstance(result, dict):
+            continue
+        action = str(result.get("action") or "").lower()
+        if action == "block":
+            return str(result.get("message") or "MCP egress blocked")
+    return None
+
+
 def get_pre_verify_continue_message(
     *,
     session_id: str = "",
