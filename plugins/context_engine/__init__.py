@@ -209,6 +209,16 @@ class _EngineCollector:
         self.engine = None
         self._engine_name = engine_name or "context_engine"
         self._registered_commands: list[str] = []
+        self.config: dict[str, Any] = {}
+        try:
+            from hermes_cli.config import load_config
+
+            context_config = (load_config() or {}).get("context", {})
+            options = context_config.get("engine_config", {}) if isinstance(context_config, dict) else {}
+            if isinstance(options, dict):
+                self.config = dict(options)
+        except Exception:
+            pass
 
     def register_context_engine(self, engine):
         self.engine = engine

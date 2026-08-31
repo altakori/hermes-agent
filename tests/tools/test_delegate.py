@@ -111,6 +111,8 @@ class TestDelegateRequirements(unittest.TestCase):
             "SELF-REPORTS",        # verification contract
             "clarify",             # child blocked-tool list
             "delegation.provider", # model inheritance / pinning
+            "prior transcript",     # fresh escalation handoff contract
+            "workspace/revision",  # repository state survives a fresh child
         ):
             self.assertIn(keyword, desc, f"top-level description lost: {keyword!r}")
         # send_message must NOT be named: gateway-internal vocabulary most
@@ -146,6 +148,26 @@ class TestChildSystemPrompt(unittest.TestCase):
         self.assertIn("Fix the tests", prompt)
         self.assertIn("YOUR TASK", prompt)
         self.assertNotIn("CONTEXT", prompt)
+
+    def test_final_summary_is_a_fresh_handoff_packet(self):
+        prompt = _build_child_system_prompt("Fix the tests")
+
+        for field in (
+            "Status",
+            "Outcome",
+            "Workspace state",
+            "Verified evidence",
+            "Changes",
+            "Failures or blockers",
+            "Ruled-out approaches",
+            "Open risks",
+            "Next verification",
+        ):
+            self.assertIn(field, prompt)
+        self.assertIn("Omit empty fields", prompt)
+        self.assertIn("Do not replay the full trajectory", prompt)
+        self.assertIn("exact identifiers, paths, commands, and error strings", prompt)
+        self.assertIn("parent must verify", prompt)
 
 class TestStripBlockedTools(unittest.TestCase):
     def test_removes_blocked_toolsets(self):

@@ -61,6 +61,12 @@ _DEMOTED_SESSION_SOURCES = ("cron",)
 # the handful of distinct sessions a typical query returns.
 _DISCOVER_SCAN_LIMIT = 300
 
+# Exact recovery verifies the digest against the complete archived text, but
+# returns a bounded, ANSI-sanitized view to the model. This prevents one large
+# terminal result from immediately re-expanding the context it was compacted
+# to protect. The full source remains durable in SessionDB.
+_RECOVERY_MAX_CONTENT_CHARS = 32_000
+
 # Raw FTS rows are only a discovery-plan input. The final response hydrates
 # its own anchored message window and bookends after lineage deduplication.
 _DISCOVER_SEARCH_FIELDS = (
@@ -1006,7 +1012,58 @@ def _session_search_impl(
                 _owned_dbs.append(profile_db)
             current_session_id = None
 
-    # Scroll shape takes precedence — explicit anchor beats any query.
+    # Content-addressed recovery takes precedence over ordinary read.  Lean
+    # compaction stubs use this exact shape so an agent can retrieve and verify
+    # the immutable archived tool output without an FTS guess.
+    from agent.compression_segments import (
+        classify_tool_segment,
+        parse_recovery_ref,
+        recover_message_by_ref,
+    )
+
+    recovery_ref = parse_recovery_ref(query) if isinstance(query, str) else None
+    if recovery_ref and isinstance(session_id, str) and session_id.strip():
+        sid = session_id.strip()
+        message = recover_message_by_ref(db, sid, recovery_ref)
+        if message is None:
+            return json.dumps(
+                {
+                    "success": False,
+                    "mode": "recover",
+                    "session_id": sid,
+                    "ref": recovery_ref,
+                    "error": "Exact recovery reference not found in this session.",
+                },
+                ensure_ascii=False,
+            )
+        content = message.get("content")
+        shaped_message = _shape_message(
+            message,
+            max_content_len=_RECOVERY_MAX_CONTENT_CHARS,
+        )
+        ansi_sanitized = isinstance(content, str) and "\x1b" in content
+        content_exact = not ansi_sanitized and not shaped_message.get(
+            "content_truncated", False
+        )
+        return json.dumps(
+            {
+                "success": True,
+                "mode": "recover",
+                "session_id": sid,
+                "ref": recovery_ref,
+                "verified": True,
+                "source_digest_verified": True,
+                "content_exact": content_exact,
+                "ansi_sanitized": ansi_sanitized,
+                "segment_type": classify_tool_segment(
+                    message.get("tool_name"), "", content or ""
+                ),
+                "message": shaped_message,
+            },
+            ensure_ascii=False,
+        )
+
+    # Scroll shape takes precedence — explicit anchor beats any ordinary query.
     if (isinstance(session_id, str) and session_id.strip()) and around_message_id is not None:
         return _scroll(
             db=db,
@@ -1145,8 +1202,10 @@ def check_session_search_requirements() -> bool:
 SESSION_SEARCH_SCHEMA = {
     "name": "session_search",
     "description": (
-        "Search past Hermes sessions (FTS5 over the local session DB), or read/"
-        "scroll inside one. Four shapes, picked by args: `query` = discovery "
+        "Search past Hermes sessions (FTS5 over the local session DB), recover "
+        "an exact compacted tool segment, or read/scroll inside one. Shapes are "
+        "picked by args: `query='ref:sha256:<digest>'` + `session_id` = verified "
+        "exact recovery; ordinary `query` = discovery "
         "(top-N matching sessions, top result fully hydrated); `session_id` + "
         "`around_message_id` = scroll (window of messages around an anchor); "
         "`session_id` alone = read a whole session — how you resolve an "
@@ -1165,8 +1224,9 @@ SESSION_SEARCH_SCHEMA = {
             "query": {
                 "type": "string",
                 "description": (
-                    "Search query (discovery shape). Keywords, phrases, or boolean "
-                    "expressions to find in past sessions. Omit to browse recent "
+                    "Search query. Use `ref:sha256:<digest>` with session_id to "
+                    "recover an exact compacted tool segment; otherwise keywords, "
+                    "phrases, or boolean expressions discover past sessions. Omit to browse recent "
                     "sessions. Ignored when session_id + around_message_id are set "
                     "(scroll shape)."
                 ),

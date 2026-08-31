@@ -34,6 +34,21 @@ Configure via `hermes plugins` → Provider Plugins → Context Engine, or edit 
 
 For building a context engine plugin, see [Context Engine Plugins](/developer-guide/context-engine-plugin).
 
+### ContextPilot-lite shadow engine
+
+Hermes ships an opt-in `context_pilot_lite` engine for conservative experiments with agent-directed context operations:
+
+```yaml
+context:
+  engine: context_pilot_lite
+  engine_config:
+    mode: shadow  # shadow (default) | active
+```
+
+It wraps the built-in `ContextCompressor`, exposes one `context_manage` tool (`note`, `archive`, `compress`, `exclude`, `recall`), and defaults to **shadow mode**. Shadow mode records bounded proposals and metrics but returns `None` from `select_context()`, so the provider request and persisted transcript remain byte-for-byte unchanged. Active mode can inject bounded non-sensitive notes and request built-in compression; archive/exclude remain proposals until a typed structural verifier can prove that no tool pair or protected turn would be orphaned. It never deletes the session archive.
+
+Use `plugins/context_engine/context_pilot_lite/evaluator.py` for offline A/B gates. The evaluator fails candidates that lose required evidence without a verified recovery callback, regress task success, or create dangling tool-call/result structure. Redacted previews are not treated as exact recovery.
+
 ## Dual Compression System
 
 Hermes has two separate compression layers that operate independently:
@@ -299,13 +314,40 @@ The `ContextCompressor.compress()` method follows a 4-phase algorithm:
 
 ### Phase 1: Prune Old Tool Results (cheap, no LLM call)
 
-Old tool results (>200 chars) outside the protected tail are replaced with:
+Old tool results (>200 chars) outside the protected tail are replaced with a
+typed, content-addressed stub:
 ```
-[Old tool output cleared to save context space]
+[SEGMENT:file_read][REF:sha256:<digest>] [read_file] read app.py ... Recover verified original view with session_search(query="ref:sha256:<digest>", session_id="<id>").
 ```
 
-This is a cheap pre-pass that saves significant tokens from verbose tool
-outputs (file contents, terminal output, search results).
+The type distinguishes file reads, shell output, test logs, tracebacks, search
+output, and web content. The full SHA-256 digest is computed over the durable
+SessionDB representation. Recovery scans active and compaction-archived rows in
+the named session, verifies the digest, and returns the exact archived message.
+Explicitly rewound/undone rows are excluded; a missing or mismatched
+reference fails closed. Byte-identical stale re-reads retain only the newest
+live copy and point older copies at the same recovery reference.
+
+The digest is always verified against the complete durable source. The
+model-visible recovery view strips ANSI control sequences and is capped at
+32,000 characters; `content_exact`, `ansi_sanitized`, and truncation metadata
+state whether that returned view is byte-for-byte content-equivalent. This
+prevents a single archived terminal result from immediately re-expanding the
+context it was compacted to protect.
+
+This is a cheap deterministic pre-pass that saves significant tokens from
+verbose tool outputs without making an auxiliary model paraphrase exact paths,
+identifiers, or errors. The current task and recent tail remain protected by
+the normal head/tail boundary rules.
+
+#### Offline quality gate
+
+Use `scripts/evaluate_compression_segments.py records.jsonl` before adopting a
+new compressor or policy. Each JSONL record carries `original`, `compressed`,
+optional `required_spans`, and optional paired `baseline_task_success` /
+`compressed_task_success` booleans. By default the command exits non-zero for
+any exact-span loss or downstream task regression; token/character reduction
+alone is never an acceptance criterion.
 
 ### Phase 2: Determine Boundaries
 

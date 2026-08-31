@@ -1429,6 +1429,36 @@ def handle_function_call(
         # (for `modify` directives). Observer plugins see
         # the hook on that same pass. When skip=True, the caller already
         # fired it — do nothing here.
+        if skip_pre_tool_call_hook and function_name.lower().startswith(("mcp__", "mcp_")):
+            try:
+                from hermes_cli.plugins import _dispatch_final_mcp_egress_hooks
+
+                final_egress_block = _dispatch_final_mcp_egress_hooks(
+                    function_name,
+                    function_args,
+                    session_id=session_id or "",
+                    tool_call_id=tool_call_id or "",
+                )
+            except Exception:
+                final_egress_block = "persistent MCP egress guard failed closed"
+            if final_egress_block is not None:
+                result = tool_error(final_egress_block)
+                _emit_post_tool_call_hook(
+                    function_name=function_name,
+                    function_args=function_args,
+                    result=result,
+                    task_id=task_id,
+                    session_id=session_id,
+                    tool_call_id=tool_call_id,
+                    turn_id=turn_id,
+                    api_request_id=api_request_id,
+                    status="blocked",
+                    error_type="plugin_block",
+                    error_message=final_egress_block,
+                    middleware_trace=list(_tool_middleware_trace),
+                )
+                return result
+
         if not skip_pre_tool_call_hook:
             block_message: Optional[str] = None
             try:
