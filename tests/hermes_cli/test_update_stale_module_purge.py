@@ -20,6 +20,7 @@ import sys
 import types
 
 import pytest
+import hermes_cli
 
 from hermes_cli import main as cli_main
 from hermes_cli import update_cmd
@@ -134,3 +135,25 @@ def test_stale_symbol_scenario_end_to_end():
         sys.modules.pop(name, None)
         if real is not None:
             sys.modules[name] = real
+
+
+def test_purge_removes_stale_child_attribute_from_protected_package():
+    name = "hermes_cli.cli_output"
+    real_module = sys.modules.get(name)
+    real_attribute = getattr(hermes_cli, "cli_output", None)
+    stale = types.ModuleType(name)
+    sys.modules[name] = stale
+    hermes_cli.cli_output = stale
+    try:
+        cli_main._purge_stale_hermes_modules()
+
+        assert getattr(hermes_cli, "cli_output", None) is not stale
+        from hermes_cli.cli_output import line_input  # noqa: F401
+    finally:
+        sys.modules.pop(name, None)
+        if real_module is not None:
+            sys.modules[name] = real_module
+        if real_attribute is not None:
+            hermes_cli.cli_output = real_attribute
+        elif hasattr(hermes_cli, "cli_output"):
+            del hermes_cli.cli_output
