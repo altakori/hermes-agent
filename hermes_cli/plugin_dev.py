@@ -151,14 +151,55 @@ class DoctorReport:
     def ok(self) -> bool:
         return not any(finding.level == "error" for finding in self.findings)
 
+    @property
+    def readiness(self) -> Literal["ready", "degraded", "unavailable", "unknown"]:
+        """Summarize this diagnostic run without changing plugin behavior.
+
+        Readiness is deliberately derived from the current Doctor report. It is
+        not persisted, does not participate in plugin loading, and must not be
+        interpreted as a live provider health check.
+        """
+        if any(finding.level == "error" for finding in self.findings):
+            return "unavailable"
+        if any(finding.level == "warning" for finding in self.findings):
+            return "degraded"
+        if self.manifest is not None:
+            return "ready"
+        return "unknown"
+
     def error(self, message: str) -> None:
         self.findings.append(DoctorFinding("error", message))
 
     def warning(self, message: str) -> None:
         self.findings.append(DoctorFinding("warning", message))
 
+    def to_dict(self) -> dict[str, Any]:
+        """Return the stable, machine-readable diagnostic result."""
+        manifest = None
+        if self.manifest is not None:
+            manifest = {
+                "name": self.manifest.name,
+                "version": self.manifest.version,
+                "kind": self.manifest.kind,
+            }
+        return {
+            "path": str(self.path),
+            "readiness": self.readiness,
+            "ok": self.ok,
+            "manifest": manifest,
+            "findings": [
+                {"level": finding.level, "message": finding.message}
+                for finding in self.findings
+            ],
+            "registrations": {
+                "tools": list(self.registered_tools),
+                "hooks": list(self.registered_hooks),
+            },
+        }
+
     def format_text(self) -> str:
         lines = [f"Plugin Doctor: {self.path}"]
+        lines.append(f"  readiness: {self.readiness}")
         if self.manifest is not None:
             lines.append(
                 f"  manifest: {self.manifest.name} "

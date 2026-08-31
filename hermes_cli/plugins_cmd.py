@@ -3048,14 +3048,31 @@ def dashboard_remove_user_plugin(name: str) -> dict[str, Any]:
     return {"ok": True, "name": name}
 
 
-def cmd_plugin_doctor(target: str = ".", *, ci: bool = False) -> None:
+def cmd_plugin_doctor(
+    target: str = ".", *, ci: bool = False, json_output: bool = False
+) -> None:
     """Validate one plugin through runtime discovery and registration."""
-    from rich.console import Console
-
     from hermes_cli.plugin_dev import doctor_plugin
 
-    report = doctor_plugin(target)
-    Console().print(report.format_text())
+    if json_output:
+        # Third-party module bodies and register() functions sometimes print.
+        # Keep stdout as one valid JSON document while preserving that output
+        # on stderr for operators who need to diagnose the plugin itself.
+        from contextlib import redirect_stdout
+        from io import StringIO
+
+        captured_stdout = StringIO()
+        with redirect_stdout(captured_stdout):
+            report = doctor_plugin(target)
+        plugin_output = captured_stdout.getvalue()
+        if plugin_output:
+            print(plugin_output, file=sys.stderr, end="")
+        print(json.dumps(report.to_dict(), indent=2))
+    else:
+        from rich.console import Console
+
+        report = doctor_plugin(target)
+        Console().print(report.format_text())
     if ci and not report.ok:
         raise SystemExit(1)
 
@@ -3162,7 +3179,11 @@ def plugins_command(args) -> None:
     elif action in {"list", "ls"}:
         cmd_list(args)
     elif action == "doctor":
-        cmd_plugin_doctor(args.target, ci=getattr(args, "ci", False))
+        cmd_plugin_doctor(
+            args.target,
+            ci=getattr(args, "ci", False),
+            json_output=getattr(args, "json", False),
+        )
     elif action == "pack":
         from hermes_cli.plugin_packs import pack_command
 

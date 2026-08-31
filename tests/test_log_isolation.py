@@ -25,9 +25,14 @@ from pathlib import Path
 import pytest
 
 
-def _real_hermes_home() -> Path:
-    """Where the operator's logs live, ignoring any test sandboxing."""
-    return Path.home() / ".hermes"
+def _real_hermes_homes() -> set[Path]:
+    """Production roots that tests must never target."""
+    from tests.conftest import PLATFORM_DEFAULT_HERMES_HOME_AT_CONFTEST_IMPORT
+
+    return {
+        PLATFORM_DEFAULT_HERMES_HOME_AT_CONFTEST_IMPORT.resolve(),
+        (Path.home() / ".hermes").resolve(),
+    }
 
 
 def _all_file_destinations() -> list[str]:
@@ -71,16 +76,38 @@ class TestLogIsolation:
         from tests.conftest import HERMES_HOME_AT_CONFTEST_IMPORT as home
 
         assert home, "conftest must set HERMES_HOME before test modules import"
-        assert Path(home).resolve() != _real_hermes_home().resolve(), (
+        assert Path(home).resolve() not in _real_hermes_homes(), (
             f"HERMES_HOME pointed at the operator's real home ({home}) when "
             "conftest loaded; import-time setup_logging() writes to their agent.log"
         )
 
+    def test_native_production_home_is_recognized(self):
+        from tests.conftest import (
+            PLATFORM_DEFAULT_HERMES_HOME_AT_CONFTEST_IMPORT,
+            _hermes_home_points_at_production,
+        )
+
+        assert _hermes_home_points_at_production(
+            str(PLATFORM_DEFAULT_HERMES_HOME_AT_CONFTEST_IMPORT)
+        )
+
+    def test_native_production_profile_is_recognized(self):
+        from tests.conftest import (
+            PLATFORM_DEFAULT_HERMES_HOME_AT_CONFTEST_IMPORT,
+            _hermes_home_points_at_production,
+        )
+
+        profile = PLATFORM_DEFAULT_HERMES_HOME_AT_CONFTEST_IMPORT / "profiles" / "worker"
+        assert _hermes_home_points_at_production(str(profile))
+
     def test_importing_the_cli_does_not_target_the_real_logs(self):
         pytest.importorskip("hermes_cli.main")
 
-        real_logs = str(_real_hermes_home() / "logs")
-        offenders = [p for p in _all_file_destinations() if p.startswith(real_logs)]
+        real_logs = [str(home / "logs") for home in _real_hermes_homes()]
+        offenders = [
+            p for p in _all_file_destinations()
+            if any(p.startswith(root) for root in real_logs)
+        ]
 
         assert offenders == [], (
             "the test session is writing into the operator's real Hermes logs:\n  "

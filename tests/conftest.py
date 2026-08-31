@@ -61,6 +61,23 @@ _PRE_SANDBOX_KANBAN_OVERRIDE = os.environ.get("HERMES_KANBAN_HOME", "").strip()
 _PRE_SANDBOX_HERMES_HOME = os.environ.get("HERMES_HOME", "")
 
 
+def _platform_default_hermes_home() -> Path:
+    """Return the native production home without importing Hermes modules.
+
+    Importing ``hermes_constants`` here is too late-safe for a collection-time
+    guard: that module may itself resolve and cache ``HERMES_HOME``.  Keep this
+    small stdlib-only mirror aligned with its platform contract instead.
+    """
+    if os.name == "nt":
+        local_appdata = os.environ.get("LOCALAPPDATA", "").strip()
+        base = Path(local_appdata) if local_appdata else Path.home() / "AppData" / "Local"
+        return base / "hermes"
+    return Path.home() / ".hermes"
+
+
+PLATFORM_DEFAULT_HERMES_HOME_AT_CONFTEST_IMPORT = _platform_default_hermes_home()
+
+
 def _hermes_home_points_at_production(value: str) -> bool:
     """True when a pre-set HERMES_HOME resolves to the real production root.
 
@@ -78,13 +95,21 @@ def _hermes_home_points_at_production(value: str) -> bool:
         return True
     try:
         resolved = Path(value).expanduser().resolve()
-        real_root = (Path.home() / ".hermes").resolve()
+        # Keep the legacy ~/.hermes root protected on Windows too: older
+        # installs and explicit launchers may still use it.
+        real_roots = {
+            PLATFORM_DEFAULT_HERMES_HOME_AT_CONFTEST_IMPORT.resolve(),
+            (Path.home() / ".hermes").resolve(),
+        }
     except Exception:
         return True
-    if resolved == real_root:
-        return True
-    # Profile home directly under the production root: <root>/profiles/<name>
-    return resolved.parent.name == "profiles" and resolved.parent.parent == real_root
+    for real_root in real_roots:
+        if resolved == real_root:
+            return True
+        # Profile home directly under a production root: <root>/profiles/<name>
+        if resolved.parent.name == "profiles" and resolved.parent.parent == real_root:
+            return True
+    return False
 
 
 if _hermes_home_points_at_production(os.environ.get("HERMES_HOME", "")):
