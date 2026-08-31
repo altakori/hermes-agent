@@ -5,7 +5,20 @@ Handles: hermes gateway [run|start|stop|restart|status|install|uninstall|setup]
 """
 
 import asyncio
-from hermes_cli.cli_output import line_input
+try:
+    from hermes_cli.cli_output import line_input
+except ImportError as exc:
+    if exc.name != "hermes_cli.cli_output" or "line_input" not in str(exc):
+        raise
+    # ``hermes update`` can import this freshly-pulled module from an older
+    # updater process that still has the pre-line_input cli_output cached.
+    # Gateway restart does not use interactive setup, so seed the compatibility
+    # fallback on that stale module for downstream imports until the new process
+    # starts with a coherent module graph.
+    import hermes_cli.cli_output as _stale_cli_output
+
+    _stale_cli_output.line_input = input
+    line_input = input
 import json
 import logging
 import os
