@@ -299,13 +299,33 @@ The `ContextCompressor.compress()` method follows a 4-phase algorithm:
 
 ### Phase 1: Prune Old Tool Results (cheap, no LLM call)
 
-Old tool results (>200 chars) outside the protected tail are replaced with:
+Old tool results (>200 chars) outside the protected tail are replaced with a
+typed, content-addressed stub:
 ```
-[Old tool output cleared to save context space]
+[SEGMENT:file_read][REF:sha256:<digest>] [read_file] read app.py ... Recover exact original with session_search(query="ref:sha256:<digest>", session_id="<id>").
 ```
 
-This is a cheap pre-pass that saves significant tokens from verbose tool
-outputs (file contents, terminal output, search results).
+The type distinguishes file reads, shell output, test logs, tracebacks, search
+output, and web content. The full SHA-256 digest is computed over the durable
+SessionDB representation. Recovery scans active and compaction-archived rows in
+the named session, verifies the digest, and returns the exact archived message.
+Explicitly rewound/undone rows are excluded; a missing or mismatched
+reference fails closed. Byte-identical stale re-reads retain only the newest
+live copy and point older copies at the same recovery reference.
+
+This is a cheap deterministic pre-pass that saves significant tokens from
+verbose tool outputs without making an auxiliary model paraphrase exact paths,
+identifiers, or errors. The current task and recent tail remain protected by
+the normal head/tail boundary rules.
+
+#### Offline quality gate
+
+Use `scripts/evaluate_compression_segments.py records.jsonl` before adopting a
+new compressor or policy. Each JSONL record carries `original`, `compressed`,
+optional `required_spans`, and optional paired `baseline_task_success` /
+`compressed_task_success` booleans. By default the command exits non-zero for
+any exact-span loss or downstream task regression; token/character reduction
+alone is never an acceptance criterion.
 
 ### Phase 2: Determine Boundaries
 

@@ -28,6 +28,12 @@ import time
 import uuid
 from typing import Any, Dict, List, Optional
 
+from agent.compression_segments import (
+    classify_tool_segment,
+    format_segment_stub,
+    make_recovery_ref,
+)
+
 from agent.auxiliary_client import (
     AuxiliaryExplicitCancellation,
     _is_connection_error,
@@ -990,15 +996,40 @@ _LEAN_TAIL_KEEP_TOOL_ROUNDS = 6
 _LEAN_TAIL_DEMOTE_MIN_CHARS = 1_500
 
 
-def _lean_recovery_stub(tool_name: str, content_len: int, session_id: str) -> str:
-    """One-line replacement for a demoted tail tool result."""
-    hint = (
-        f" Recover with session_search(query=..., session_id='{session_id}')"
-        if session_id else ""
-    )
-    return (
-        f"[{tool_name or 'tool'} output demoted at compaction — {content_len:,} "
-        f"chars preserved in session history.{hint}]"
+def _lean_recovery_stub(
+    tool_name: str,
+    content_len: int,
+    session_id: str,
+    *,
+    content: str = "",
+    tool_args: str = "",
+) -> str:
+    """One-line typed replacement for a demoted tail tool result.
+
+    When the original text is available, the stub carries a full SHA-256
+    content address.  ``session_search`` verifies that digest against inactive
+    compaction rows before returning the exact original.
+    """
+    if not isinstance(content, str) or not content:
+        # Backward-compatible shape for callers that only know the length.
+        hint = (
+            f" Recover with session_search(session_id='{session_id}')"
+            if session_id else ""
+        )
+        return (
+            f"[{tool_name or 'tool'} output demoted at compaction — {content_len:,} "
+            f"chars preserved in session history.{hint}]"
+        )
+    segment_type = classify_tool_segment(tool_name, tool_args, content)
+    recovery_ref = make_recovery_ref(content)
+    return format_segment_stub(
+        segment_type=segment_type,
+        recovery_ref=recovery_ref,
+        summary=(
+            f"[{tool_name or 'tool'}] output demoted at compaction — "
+            f"{content_len:,} chars preserved in session history."
+        ),
+        session_id=session_id,
     )
 
 
@@ -4027,7 +4058,7 @@ class ContextCompressor(ContextEngine):
         # Pass 1: Deduplicate identical tool results.
         # When the same file is read multiple times, keep only the most recent
         # full copy and replace older duplicates with a back-reference.
-        content_hashes: dict = {}  # hash -> (index, tool_call_id)
+        content_hashes: dict = {}  # ref -> (index, tool_call_id)
         for i in range(len(result) - 1, -1, -1):
             msg = result[i]
             if msg.get("role") != "tool":
@@ -4042,13 +4073,28 @@ class ContextCompressor(ContextEngine):
                 continue
             if len(content) < _PRUNE_MIN_CHARS:
                 continue
-            h = hashlib.md5(content.encode("utf-8", errors="replace")).hexdigest()[:12]
-            if h in content_hashes:
-                # This is an older duplicate — replace with back-reference
-                result[i] = {**msg, "content": "[Duplicate tool output — same content as a more recent call]"}
+            recovery_ref = make_recovery_ref(content)
+            if recovery_ref in content_hashes:
+                # This is an older duplicate.  Point at the exact bytes, not
+                # merely "a more recent call", so recovery stays deterministic
+                # even after another compaction removes that newer live copy.
+                call_id = msg.get("tool_call_id", "")
+                tool_name, tool_args = call_id_to_tool.get(
+                    call_id, (msg.get("tool_name") or "unknown", "")
+                )
+                segment_type = classify_tool_segment(tool_name, tool_args, content)
+                replacement_content = format_segment_stub(
+                    segment_type=segment_type,
+                    recovery_ref=recovery_ref,
+                    summary="[Duplicate tool output — exact content matches a more recent call]",
+                    session_id=getattr(self, "_session_id", "") or "",
+                )
+                if len(replacement_content) >= len(content):
+                    continue  # compression must never make a short result larger
+                result[i] = {**msg, "content": replacement_content}
                 pruned += 1
             else:
-                content_hashes[h] = (i, msg.get("tool_call_id", "?"))
+                content_hashes[recovery_ref] = (i, msg.get("tool_call_id", "?"))
 
         # Ghost-skill defense (#32106): skills just loaded (or actively
         # referenced in the protected tail) keep their full skill_view
@@ -4082,7 +4128,7 @@ class ContextCompressor(ContextEngine):
                 return False
             if not content or content == _PRUNED_TOOL_PLACEHOLDER:
                 return False
-            if content.startswith("[Duplicate tool output"):
+            if content.startswith("[Duplicate tool output") or content.startswith("[SEGMENT:"):
                 return False
             # Already replaced by a prior prune/pressure pass (1-line summary).
             if content.startswith("[") and " chars)" in content and len(content) < 400:
@@ -4106,7 +4152,22 @@ class ContextCompressor(ContextEngine):
                 if isinstance(_skill, str) and _skill.lower() in protected_skills:
                     return False
             summary = _summarize_tool_result(tool_name, tool_args, content)
-            result[idx] = {**msg, "content": summary}
+            if tool_name == "clarify":
+                # Clarify results contain the user's own words and have a strict
+                # sub-_PRUNE_MIN_CHARS cap so later passes never summarize them
+                # again.  A 71-char SHA-256 marker would violate that invariant;
+                # keep the established verbatim-prefix summary instead.
+                replacement_content = summary
+            else:
+                replacement_content = format_segment_stub(
+                    segment_type=classify_tool_segment(tool_name, tool_args, content),
+                    recovery_ref=make_recovery_ref(content),
+                    summary=summary,
+                    session_id=getattr(self, "_session_id", "") or "",
+                )
+            if len(replacement_content) >= len(content):
+                return False  # typed metadata is not worth negative compression
+            result[idx] = {**msg, "content": replacement_content}
             pruned += 1
             return True
 
@@ -4705,10 +4766,15 @@ Summary generation was unavailable, so this is a best-effort deterministic fallb
                 continue
             if SKILL_PRUNED_MARKER_PREFIX in content:
                 continue
+            if content.startswith("[SEGMENT:"):
+                continue  # already a typed, content-addressed recovery stub
             if content.startswith("[") and " chars)" in content and len(content) < 400:
                 continue  # already a summary stub
             stub = _lean_recovery_stub(
-                msg.get("tool_name") or "", len(content), session_id,
+                msg.get("tool_name") or "",
+                len(content),
+                session_id,
+                content=content,
             )
             replaced = {**msg, "content": stub}
             drop_stale_api_content(replaced)
