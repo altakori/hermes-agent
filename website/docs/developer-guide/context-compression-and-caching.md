@@ -302,7 +302,7 @@ The `ContextCompressor.compress()` method follows a 4-phase algorithm:
 Old tool results (>200 chars) outside the protected tail are replaced with a
 typed, content-addressed stub:
 ```
-[SEGMENT:file_read][REF:sha256:<digest>] [read_file] read app.py ... Recover exact original with session_search(query="ref:sha256:<digest>", session_id="<id>").
+[SEGMENT:file_read][REF:sha256:<digest>] [read_file] read app.py ... Recover verified original view with session_search(query="ref:sha256:<digest>", session_id="<id>").
 ```
 
 The type distinguishes file reads, shell output, test logs, tracebacks, search
@@ -312,6 +312,13 @@ the named session, verifies the digest, and returns the exact archived message.
 Explicitly rewound/undone rows are excluded; a missing or mismatched
 reference fails closed. Byte-identical stale re-reads retain only the newest
 live copy and point older copies at the same recovery reference.
+
+The digest is always verified against the complete durable source. The
+model-visible recovery view strips ANSI control sequences and is capped at
+32,000 characters; `content_exact`, `ansi_sanitized`, and truncation metadata
+state whether that returned view is byte-for-byte content-equivalent. This
+prevents a single archived terminal result from immediately re-expanding the
+context it was compacted to protect.
 
 This is a cheap deterministic pre-pass that saves significant tokens from
 verbose tool outputs without making an auxiliary model paraphrase exact paths,

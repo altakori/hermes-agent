@@ -61,6 +61,12 @@ _DEMOTED_SESSION_SOURCES = ("cron",)
 # the handful of distinct sessions a typical query returns.
 _DISCOVER_SCAN_LIMIT = 300
 
+# Exact recovery verifies the digest against the complete archived text, but
+# returns a bounded, ANSI-sanitized view to the model. This prevents one large
+# terminal result from immediately re-expanding the context it was compacted
+# to protect. The full source remains durable in SessionDB.
+_RECOVERY_MAX_CONTENT_CHARS = 32_000
+
 # Raw FTS rows are only a discovery-plan input. The final response hydrates
 # its own anchored message window and bookends after lineage deduplication.
 _DISCOVER_SEARCH_FIELDS = (
@@ -1031,11 +1037,14 @@ def _session_search_impl(
                 ensure_ascii=False,
             )
         content = message.get("content")
-        exact_message = {
-            key: message.get(key)
-            for key in ("id", "role", "content", "tool_call_id", "tool_name", "timestamp")
-            if key in message
-        }
+        shaped_message = _shape_message(
+            message,
+            max_content_len=_RECOVERY_MAX_CONTENT_CHARS,
+        )
+        ansi_sanitized = isinstance(content, str) and "\x1b" in content
+        content_exact = not ansi_sanitized and not shaped_message.get(
+            "content_truncated", False
+        )
         return json.dumps(
             {
                 "success": True,
@@ -1043,10 +1052,13 @@ def _session_search_impl(
                 "session_id": sid,
                 "ref": recovery_ref,
                 "verified": True,
+                "source_digest_verified": True,
+                "content_exact": content_exact,
+                "ansi_sanitized": ansi_sanitized,
                 "segment_type": classify_tool_segment(
                     message.get("tool_name"), "", content or ""
                 ),
-                "message": exact_message,
+                "message": shaped_message,
             },
             ensure_ascii=False,
         )

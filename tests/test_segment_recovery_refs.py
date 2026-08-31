@@ -84,6 +84,9 @@ def test_session_search_recovers_inactive_compacted_output_by_verified_ref(tmp_p
         assert payload["success"] is True
         assert payload["mode"] == "recover"
         assert payload["verified"] is True
+        assert payload["source_digest_verified"] is True
+        assert payload["content_exact"] is True
+        assert payload["ansi_sanitized"] is False
         assert payload["message"]["content"] == content
         assert payload["segment_type"] == "traceback"
     finally:
@@ -138,5 +141,49 @@ def test_session_search_never_recovers_rewound_tool_message(tmp_path):
         )
         assert payload["success"] is False
         assert payload["mode"] == "recover"
+    finally:
+        db.close()
+
+
+def test_session_search_recovery_strips_ansi_but_verifies_raw_source(tmp_path):
+    db = SessionDB(db_path=tmp_path / "ansi.db")
+    try:
+        db.create_session(session_id="ansi", source="cli", model="test")
+        raw = "\x1b[31mValueError: EXACT_RED\x1b[0m"
+        db.append_message(
+            "ansi", "tool", raw, tool_call_id="ansi-call", tool_name="terminal"
+        )
+        payload = json.loads(
+            session_search(
+                query=f"ref:{make_recovery_ref(raw)}", session_id="ansi", db=db
+            )
+        )
+        assert payload["source_digest_verified"] is True
+        assert payload["content_exact"] is False
+        assert payload["ansi_sanitized"] is True
+        assert payload["message"]["content"] == "ValueError: EXACT_RED"
+        assert "\x1b" not in payload["message"]["content"]
+    finally:
+        db.close()
+
+
+def test_session_search_recovery_bounds_large_output(tmp_path):
+    db = SessionDB(db_path=tmp_path / "large.db")
+    try:
+        db.create_session(session_id="large", source="cli", model="test")
+        raw = "X" * 40_000
+        db.append_message(
+            "large", "tool", raw, tool_call_id="large-call", tool_name="terminal"
+        )
+        payload = json.loads(
+            session_search(
+                query=f"ref:{make_recovery_ref(raw)}", session_id="large", db=db
+            )
+        )
+        assert payload["source_digest_verified"] is True
+        assert payload["content_exact"] is False
+        assert payload["message"]["content_truncated"] is True
+        assert payload["message"]["original_content_chars"] == 40_000
+        assert len(payload["message"]["content"]) == 32_001
     finally:
         db.close()

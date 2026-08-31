@@ -110,7 +110,7 @@ def format_segment_stub(
     hint = ""
     if session_id:
         hint = (
-            " Recover exact original with "
+            " Recover verified original view with "
             "session_search("
             f"query={json.dumps(f'ref:{recovery_ref}')}, "
             f"session_id={json.dumps(session_id)})."
