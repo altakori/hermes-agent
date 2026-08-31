@@ -117,7 +117,8 @@ def _purge_stale_hermes_modules() -> None:
 
         importlib.invalidate_caches()
         purged = []
-        for name in list(_m().sys.modules):
+        modules = _m().sys.modules
+        for name in list(modules):
             if name in _STALE_PURGE_PROTECTED:
                 continue
             if not name.startswith(_STALE_PURGE_PREFIXES):
@@ -127,7 +128,19 @@ def _purge_stale_hermes_modules() -> None:
                 # Prefix-string match caught an unrelated package
                 # (e.g. ``gateway_foo``) — leave it alone.
                 continue
-            if _m().sys.modules.pop(name, None) is not None:
+            stale = modules.pop(name, None)
+            if stale is not None:
+                # ``import package.child`` also caches ``child`` as an
+                # attribute on ``package``. Removing only the sys.modules
+                # entry leaves ``from package import child`` free to return
+                # that stale object without re-importing it (#install-e2e).
+                parent_name, separator, child_name = name.rpartition(".")
+                parent = modules.get(parent_name) if separator else None
+                if parent is not None and getattr(parent, child_name, None) is stale:
+                    try:
+                        delattr(parent, child_name)
+                    except (AttributeError, TypeError):
+                        pass
                 purged.append(name)
         if purged:
             logger.debug(
