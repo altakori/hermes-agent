@@ -200,6 +200,60 @@ def test_write_credential_pool_targets_profile_not_global(profile_env):
     assert [e["id"] for e in read_credential_pool("openrouter")] == ["prof-new"]
 
 
+def test_codex_profile_prefers_fresher_global_token_and_adds_global_only(profile_env):
+    """A stale profile copy must not hide Zebra-refreshed global Codex rows."""
+    from hermes_cli.auth import read_credential_pool
+
+    _write(profile_env["global"] / "auth.json", _make_auth_store(pool={
+        "openai-codex": [
+            _pool_entry(
+                id="shared",
+                label="shared",
+                access_token="global-fresh",
+                expires_at=2_000,
+            ),
+            _pool_entry(id="global-only", label="global-only"),
+        ],
+    }))
+    _write(profile_env["profile"] / "auth.json", _make_auth_store(pool={
+        "openai-codex": [
+            _pool_entry(
+                id="shared",
+                label="shared",
+                access_token="profile-stale",
+                expires_at=1_000,
+                last_status="exhausted",
+                failure_reason="auth",
+            ),
+        ],
+    }))
+
+    entries = read_credential_pool("openai-codex")
+    assert [entry["id"] for entry in entries] == ["shared", "global-only"]
+    assert entries[0]["access_token"] == "global-fresh"
+
+    all_entries = read_credential_pool()["openai-codex"]
+    assert [entry["id"] for entry in all_entries] == ["shared", "global-only"]
+    assert all_entries[0]["access_token"] == "global-fresh"
+
+
+def test_codex_profile_keeps_newer_profile_token(profile_env):
+    from hermes_cli.auth import read_credential_pool
+
+    _write(profile_env["global"] / "auth.json", _make_auth_store(pool={
+        "openai-codex": [
+            _pool_entry(id="shared", access_token="global-old", expires_at=1_000),
+        ],
+    }))
+    _write(profile_env["profile"] / "auth.json", _make_auth_store(pool={
+        "openai-codex": [
+            _pool_entry(id="shared", access_token="profile-new", expires_at=2_000),
+        ],
+    }))
+
+    assert read_credential_pool("openai-codex")[0]["access_token"] == "profile-new"
+
+
 
 
 def test_auth_lock_reentrancy_is_scoped_after_profile_context_switch(profile_env):

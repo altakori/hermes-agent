@@ -1687,6 +1687,82 @@ def is_runtime_provider_routable(provider_id: str) -> bool:
     return True
 
 
+def _codex_entry_identity(entry: Dict[str, Any]) -> str:
+    return str(entry.get("id") or entry.get("label") or "").strip()
+
+
+def _codex_token_freshness(entry: Dict[str, Any]) -> tuple[float, float]:
+    """Return comparable ``(exp, iat)`` claims without logging token data."""
+    claims = _decode_jwt_claims(entry.get("access_token"))
+    try:
+        exp = float(claims.get("exp") or entry.get("expires_at") or 0.0)
+    except (TypeError, ValueError):
+        exp = 0.0
+    try:
+        iat = float(claims.get("iat") or 0.0)
+    except (TypeError, ValueError):
+        iat = 0.0
+    return exp, iat
+
+
+def _codex_auth_failed(entry: Dict[str, Any]) -> bool:
+    status = str(entry.get("last_status") or "").strip().casefold()
+    reason = " ".join(
+        str(entry.get(key) or "")
+        for key in ("failure_reason", "last_error_reason", "last_error_message")
+    ).casefold()
+    return status in {"dead", "exhausted"} and any(
+        marker in reason
+        for marker in ("auth", "token", "expired", "revoked", "401", "403")
+    )
+
+
+def _merge_profile_codex_entries(
+    profile_entries: List[Dict[str, Any]],
+    global_entries: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """Prefer a refreshed global Codex token over a stale profile snapshot.
+
+    Named profiles historically copied global Codex rows on their first
+    runtime-health write.  Those copies then shadowed the Zebra-refreshed
+    global rows forever and eventually failed with expired-token 401s.  Keep
+    profile-specific rows authoritative unless the same credential has a
+    strictly fresher global token, or the profile row is auth-failed while the
+    global row is not.  Global-only credentials remain available as fallback.
+    """
+    globals_by_id = {
+        _codex_entry_identity(entry): entry
+        for entry in global_entries
+        if isinstance(entry, dict) and _codex_entry_identity(entry)
+    }
+    merged: List[Dict[str, Any]] = []
+    seen: set[str] = set()
+    for profile_entry in profile_entries:
+        if not isinstance(profile_entry, dict):
+            continue
+        identity = _codex_entry_identity(profile_entry)
+        global_entry = globals_by_id.get(identity)
+        chosen = profile_entry
+        if global_entry is not None:
+            profile_freshness = _codex_token_freshness(profile_entry)
+            global_freshness = _codex_token_freshness(global_entry)
+            if global_freshness > profile_freshness or (
+                _codex_auth_failed(profile_entry) and not _codex_auth_failed(global_entry)
+            ):
+                chosen = global_entry
+        merged.append(dict(chosen))
+        if identity:
+            seen.add(identity)
+    for global_entry in global_entries:
+        if not isinstance(global_entry, dict):
+            continue
+        identity = _codex_entry_identity(global_entry)
+        if identity and identity not in seen:
+            merged.append(dict(global_entry))
+            seen.add(identity)
+    return merged
+
+
 def read_credential_pool(provider_id: Optional[str] = None) -> Dict[str, Any]:
     """Return the persisted credential pool, or one provider slice.
 
@@ -1695,10 +1771,9 @@ def read_credential_pool(provider_id: Optional[str] = None) -> Dict[str, Any]:
     ``auth.json`` are used as a read-only fallback — so workers spawned in a
     profile can see providers that were only authenticated at global scope.
 
-    Profile entries always win: the global fallback only applies per-provider
-    when the profile has zero entries for that provider. Once the user runs
-    ``hermes auth add <provider>`` inside the profile, profile entries
-    fully shadow global for that provider on the next read.
+    Profile entries normally win. OpenAI Codex is the exception: refreshed
+    global rows are merged per credential so a stale profile copy cannot hide
+    a newer Zebra-refreshed token.
 
     Writes always go to the profile (``write_credential_pool`` is unchanged).
     See issue #18594 follow-up.
@@ -1722,12 +1797,18 @@ def read_credential_pool(provider_id: Optional[str] = None) -> Dict[str, Any]:
             # Per-provider shadowing: profile wins whenever it has ANY entries.
             existing = merged.get(gp_key)
             if isinstance(existing, list) and existing:
+                if gp_key == "openai-codex":
+                    merged[gp_key] = _merge_profile_codex_entries(existing, gp_entries)
                 continue
             merged[gp_key] = list(gp_entries)
         return merged
 
     provider_entries = pool.get(provider_id)
     if isinstance(provider_entries, list) and provider_entries:
+        if provider_id == "openai-codex":
+            global_entries = global_pool.get(provider_id)
+            if isinstance(global_entries, list) and global_entries:
+                return _merge_profile_codex_entries(provider_entries, global_entries)
         return list(provider_entries)
     # Profile has no entries for this provider — fall back to global.
     global_entries = global_pool.get(provider_id)
