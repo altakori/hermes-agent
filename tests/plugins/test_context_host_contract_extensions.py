@@ -108,3 +108,58 @@ def test_evaluator_gates_evidence_and_dangling_tool_call():
     dangling = [{"role": "user", "content": "run"}, {"role": "assistant", "content": "", "tool_calls": [{"id": "call-1"}]}]
     invalid = evaluate_case(baseline, dangling)
     assert not invalid.passed and "invalid role/tool structure" in invalid.failures
+
+
+def test_evaluator_reports_cache_token_latency_and_recovery_usage():
+    messages = [{"role": "user", "content": "retain evidence"}]
+    result = evaluate_case(
+        messages,
+        messages,
+        baseline_usage=[
+            {"input_tokens": 100, "cached_input_tokens": 0, "output_tokens": 12,
+             "latency_ms": 25.25, "recovery_calls": 1},
+            {"input_tokens": 200, "cached_input_tokens": 150, "output_tokens": 8,
+             "latency_ms": 10.5},
+        ],
+        candidate_usage=[
+            {"input_tokens": 120, "cached_input_tokens": 100, "output_tokens": 10,
+             "latency_ms": 12.0},
+        ],
+    )
+    assert result.passed
+    assert result.baseline_usage == {
+        "turns": 2,
+        "input_tokens": 300,
+        "cached_input_tokens": 150,
+        "cache_hit_ratio": 0.5,
+        "cache_miss_turns": [1],
+        "output_tokens": 20,
+        "latency_ms": 35.75,
+        "recovery_calls": 1,
+    }
+    assert result.candidate_usage["cache_hit_ratio"] == 100 / 120
+    assert result.candidate_usage["cache_miss_turns"] == []
+
+
+def test_evaluator_rejects_invalid_usage_evidence():
+    messages = [{"role": "user", "content": "x"}]
+    result = evaluate_case(
+        messages,
+        messages,
+        candidate_usage=[{"input_tokens": 10, "cached_input_tokens": 11}],
+    )
+    assert not result.passed
+    assert result.candidate_usage["turns"] == 0
+    assert result.failures == [
+        "invalid candidate usage: turn 1 cached input exceeds input tokens"
+    ]
+
+    invalid_latency = evaluate_case(
+        messages,
+        messages,
+        candidate_usage=[{"latency_ms": float("inf")}],
+    )
+    assert not invalid_latency.passed
+    assert invalid_latency.failures == [
+        "invalid candidate usage: turn 1 contains an invalid latency"
+    ]

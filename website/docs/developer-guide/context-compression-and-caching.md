@@ -47,7 +47,9 @@ context:
 
 It wraps the built-in `ContextCompressor`, exposes one `context_manage` tool (`note`, `archive`, `compress`, `exclude`, `recall`), and defaults to **shadow mode**. Shadow mode records bounded proposals and metrics but returns `None` from `select_context()`, so the provider request and persisted transcript remain byte-for-byte unchanged. Active mode can inject bounded non-sensitive notes and request built-in compression; archive/exclude remain proposals until a typed structural verifier can prove that no tool pair or protected turn would be orphaned. It never deletes the session archive.
 
-Use `plugins/context_engine/context_pilot_lite/evaluator.py` for offline A/B gates. The evaluator fails candidates that lose required evidence without a verified recovery callback, regress task success, or create dangling tool-call/result structure. Redacted previews are not treated as exact recovery.
+Use `plugins/context_engine/context_pilot_lite/evaluator.py` for offline A/B gates. The evaluator fails candidates that lose required evidence without a verified recovery callback, regress task success, create dangling tool-call/result structure, or provide malformed usage evidence. Redacted previews are not treated as exact recovery.
+
+Each case can also supply `baseline_usage` and `candidate_usage` as per-turn records containing `input_tokens`, `cached_input_tokens`, `output_tokens`, `latency_ms`, and `recovery_calls`. The report aggregates total input/output tokens, cached-input ratio, one-based cache-miss turns, latency, and recovery calls. These measurements are observational rather than universal pass thresholds: compare them together with task success and verified recoverability, because a smaller context or higher cache ratio is not useful if the task regresses.
 
 ## Dual Compression System
 

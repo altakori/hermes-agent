@@ -1,6 +1,7 @@
 """Offline A/B evaluator for ContextPilot-lite (no model/network calls)."""
 from __future__ import annotations
 from dataclasses import dataclass, asdict
+import math
 from typing import Any, Callable, Iterable
 
 @dataclass
@@ -12,6 +13,8 @@ class ABResult:
     role_tool_structural_validity: bool
     task_success_baseline: bool
     task_success_candidate: bool
+    baseline_usage: dict[str, Any]
+    candidate_usage: dict[str, Any]
     passed: bool
     failures: list[str]
 
@@ -43,9 +46,62 @@ def _valid(messages):
     return not pending
 
 
+def _usage(turns: Iterable[dict] | None) -> tuple[dict[str, Any], list[str]]:
+    summary: dict[str, Any] = {
+        "turns": 0,
+        "input_tokens": 0,
+        "cached_input_tokens": 0,
+        "cache_hit_ratio": None,
+        "cache_miss_turns": [],
+        "output_tokens": 0,
+        "latency_ms": 0.0,
+        "recovery_calls": 0,
+    }
+    errors = []
+
+    for index, turn in enumerate(turns or (), start=1):
+        if not isinstance(turn, dict):
+            errors.append(f"turn {index} is not an object")
+            continue
+        counts = [turn.get(name, 0) for name in (
+            "input_tokens", "cached_input_tokens", "output_tokens", "recovery_calls"
+        )]
+        if any(isinstance(value, bool) or not isinstance(value, int) or value < 0
+               for value in counts):
+            errors.append(f"turn {index} contains an invalid count")
+            continue
+        input_tokens, cached_tokens, output_tokens, recovery_calls = counts
+        latency_value = turn.get("latency_ms", 0.0)
+        if (isinstance(latency_value, bool)
+                or not isinstance(latency_value, (int, float))
+                or latency_value < 0
+                or not math.isfinite(latency_value)):
+            errors.append(f"turn {index} contains an invalid latency")
+            continue
+        latency_ms = float(latency_value)
+        if cached_tokens > input_tokens:
+            errors.append(f"turn {index} cached input exceeds input tokens")
+            continue
+        summary["turns"] += 1
+        summary["input_tokens"] += input_tokens
+        summary["cached_input_tokens"] += cached_tokens
+        summary["output_tokens"] += output_tokens
+        summary["latency_ms"] += latency_ms
+        summary["recovery_calls"] += recovery_calls
+        if input_tokens and not cached_tokens:
+            summary["cache_miss_turns"].append(index)
+    total_input = summary["input_tokens"]
+    if total_input:
+        summary["cache_hit_ratio"] = summary["cached_input_tokens"] / total_input
+    summary["latency_ms"] = round(summary["latency_ms"], 3)
+    return summary, errors
+
+
 def evaluate_case(baseline: list[dict], candidate: list[dict], required_spans: Iterable[str] = (),
                   recovery_refs: Iterable[str] = (), task_success_baseline: bool = True,
-                  task_success_candidate: bool = True, recover: Callable[[str], bool] | None = None) -> ABResult:
+                  task_success_candidate: bool = True, recover: Callable[[str], bool] | None = None,
+                  baseline_usage: Iterable[dict] | None = None,
+                  candidate_usage: Iterable[dict] | None = None) -> ABResult:
     required = list(required_spans)
     direct = all(any(span in str(m.get("content", "")) for m in candidate) for span in required)
     refs = list(recovery_refs)
@@ -55,8 +111,13 @@ def evaluate_case(baseline: list[dict], candidate: list[dict], required_spans: I
     if task_success_baseline and not task_success_candidate: failures.append("candidate task regression")
     valid = _valid(candidate)
     if not valid: failures.append("invalid role/tool structure")
+    baseline_usage_summary, baseline_usage_errors = _usage(baseline_usage)
+    candidate_usage_summary, candidate_usage_errors = _usage(candidate_usage)
+    failures.extend(f"invalid baseline usage: {error}" for error in baseline_usage_errors)
+    failures.extend(f"invalid candidate usage: {error}" for error in candidate_usage_errors)
     return ABResult(_size(baseline), _size(candidate), direct, recoverable, valid,
-                    task_success_baseline, task_success_candidate, not failures, failures)
+                    task_success_baseline, task_success_candidate, baseline_usage_summary,
+                    candidate_usage_summary, not failures, failures)
 
 
 def evaluate_ab(cases: Iterable[dict]) -> dict:
