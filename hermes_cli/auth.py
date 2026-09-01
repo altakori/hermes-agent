@@ -1763,6 +1763,71 @@ def _merge_profile_codex_entries(
     return merged
 
 
+_DISABLED_CREDENTIAL_IDS_KEY = "disabled_credential_ids"
+
+
+def _disabled_credential_ids_from_store(
+    store: Optional[Dict[str, Any]], provider_id: str,
+) -> set[str]:
+    if not isinstance(store, dict):
+        return set()
+    root = store.get(_DISABLED_CREDENTIAL_IDS_KEY)
+    values = root.get(provider_id) if isinstance(root, dict) else None
+    if not isinstance(values, list):
+        return set()
+    return {str(value).strip() for value in values if str(value).strip()}
+
+
+def read_disabled_credential_ids(provider_id: str) -> set[str]:
+    """Return credential tombstones merged across global and profile stores."""
+    provider_id = str(provider_id or "").strip().casefold()
+    if not provider_id:
+        return set()
+    return (
+        _disabled_credential_ids_from_store(_load_global_auth_store(), provider_id)
+        | _disabled_credential_ids_from_store(_load_auth_store(), provider_id)
+    )
+
+
+def disable_credential(provider_id: str, credential_id: str) -> bool:
+    """Atomically tombstone and remove a credential from the active auth store.
+
+    The tombstone is intentionally separate from the mutable pool rows.  A
+    long-lived Gateway may still hold the removed row in memory and persist a
+    stale snapshot later; ``write_credential_pool`` filters tombstoned IDs so
+    that stale writers cannot resurrect an account the user explicitly removed.
+    """
+    provider_id = str(provider_id or "").strip().casefold()
+    credential_id = str(credential_id or "").strip()
+    if not provider_id or not credential_id:
+        return False
+    with _auth_store_lock():
+        store = _load_auth_store()
+        root = store.get(_DISABLED_CREDENTIAL_IDS_KEY)
+        if not isinstance(root, dict):
+            root = {}
+            store[_DISABLED_CREDENTIAL_IDS_KEY] = root
+        disabled = {
+            str(value).strip()
+            for value in (root.get(provider_id) or [])
+            if str(value).strip()
+        }
+        changed = credential_id not in disabled
+        disabled.add(credential_id)
+        root[provider_id] = sorted(disabled)
+        pool = store.get("credential_pool")
+        if isinstance(pool, dict) and isinstance(pool.get(provider_id), list):
+            before = len(pool[provider_id])
+            pool[provider_id] = [
+                entry for entry in pool[provider_id]
+                if not isinstance(entry, dict)
+                or str(entry.get("id") or "").strip() != credential_id
+            ]
+            changed = changed or len(pool[provider_id]) != before
+        _save_auth_store(store)
+        return changed
+
+
 def read_credential_pool(provider_id: Optional[str] = None) -> Dict[str, Any]:
     """Return the persisted credential pool, or one provider slice.
 
@@ -1789,30 +1854,48 @@ def read_credential_pool(provider_id: Optional[str] = None) -> Dict[str, Any]:
     if isinstance(maybe_global_pool, dict):
         global_pool = maybe_global_pool
 
+    def _filtered(entries: Any, pool_provider: str) -> List[Dict[str, Any]]:
+        if not isinstance(entries, list):
+            return []
+        disabled = (
+            _disabled_credential_ids_from_store(global_store, pool_provider)
+            | _disabled_credential_ids_from_store(auth_store, pool_provider)
+        )
+        if not disabled:
+            return list(entries)
+        return [
+            entry for entry in entries
+            if not isinstance(entry, dict)
+            or str(entry.get("id") or "").strip() not in disabled
+        ]
+
     if provider_id is None:
-        merged = dict(pool)
+        merged = {
+            key: _filtered(entries, key) if isinstance(entries, list) else entries
+            for key, entries in pool.items()
+        }
         for gp_key, gp_entries in global_pool.items():
-            if not isinstance(gp_entries, list) or not gp_entries:
+            filtered_global = _filtered(gp_entries, gp_key)
+            if not filtered_global:
                 continue
             # Per-provider shadowing: profile wins whenever it has ANY entries.
             existing = merged.get(gp_key)
             if isinstance(existing, list) and existing:
                 if gp_key == "openai-codex":
-                    merged[gp_key] = _merge_profile_codex_entries(existing, gp_entries)
+                    merged[gp_key] = _merge_profile_codex_entries(existing, filtered_global)
                 continue
-            merged[gp_key] = list(gp_entries)
+            merged[gp_key] = filtered_global
         return merged
 
-    provider_entries = pool.get(provider_id)
-    if isinstance(provider_entries, list) and provider_entries:
+    provider_entries = _filtered(pool.get(provider_id), provider_id)
+    if provider_entries:
         if provider_id == "openai-codex":
-            global_entries = global_pool.get(provider_id)
-            if isinstance(global_entries, list) and global_entries:
+            global_entries = _filtered(global_pool.get(provider_id), provider_id)
+            if global_entries:
                 return _merge_profile_codex_entries(provider_entries, global_entries)
-        return list(provider_entries)
+        return provider_entries
     # Profile has no entries for this provider — fall back to global.
-    global_entries = global_pool.get(provider_id)
-    return list(global_entries) if isinstance(global_entries, list) else []
+    return _filtered(global_pool.get(provider_id), provider_id)
 
 
 _CREDENTIAL_MODEL_EXCLUSIONS_KEY = "credential_model_exclusions"
@@ -1993,10 +2076,16 @@ def write_credential_pool(
         if not isinstance(pool, dict):
             pool = {}
             auth_store["credential_pool"] = pool
+        disabled = _disabled_credential_ids_from_store(auth_store, provider_id)
+        disabled.update(
+            _disabled_credential_ids_from_store(_load_global_auth_store(), provider_id)
+        )
         sanitized_entries = [
             sanitize_borrowed_credential_payload(entry, provider_id)
             if isinstance(entry, dict) else entry
             for entry in entries
+            if not isinstance(entry, dict)
+            or str(entry.get("id") or "").strip() not in disabled
         ]
         existing = pool.get(provider_id)
         existing_list = existing if isinstance(existing, list) else []
@@ -2022,7 +2111,7 @@ def write_credential_pool(
             if not isinstance(disk_entry, dict):
                 continue
             disk_id = disk_entry.get("id")
-            if not disk_id or disk_id in new_ids or disk_id in removed:
+            if not disk_id or disk_id in new_ids or disk_id in removed or disk_id in disabled:
                 continue
             merged.append(sanitize_borrowed_credential_payload(disk_entry, provider_id))
         pool[provider_id] = merged
