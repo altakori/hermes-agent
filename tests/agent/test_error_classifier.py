@@ -62,7 +62,7 @@ class TestFailoverReason:
             "ssl_cert_verification",
             "context_overflow", "payload_too_large", "image_too_large",
             "image_corrupt",
-            "model_not_found", "format_error",
+            "model_not_found", "credential_model_unsupported", "format_error",
             "invalid_encrypted_content",
             "multimodal_tool_content_unsupported",
             "provider_policy_blocked",
@@ -74,6 +74,29 @@ class TestFailoverReason:
         }
         actual = {r.value for r in FailoverReason}
         assert expected == actual
+
+
+def test_codex_account_model_entitlement_400_rotates_credential():
+    error = MockAPIError(
+        "The 'gpt-5.6-sol' model is not supported when using Codex with a ChatGPT account.",
+        status_code=400,
+        body={
+            "error": {
+                "message": "The 'gpt-5.6-sol' model is not supported when using Codex with a ChatGPT account."
+            }
+        },
+    )
+
+    classified = classify_api_error(
+        error,
+        provider="openai-codex",
+        model="gpt-5.6-sol",
+    )
+
+    assert classified.reason == FailoverReason.credential_model_unsupported
+    assert classified.retryable is False
+    assert classified.should_rotate_credential is True
+    assert classified.should_fallback is True
 
 
 # ── Test: ClassifiedError ──────────────────────────────────────────────

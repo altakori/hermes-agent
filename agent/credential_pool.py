@@ -185,6 +185,7 @@ _EXTRA_KEYS = frozenset({
     # with the entry so a restart doesn't downgrade a billing bench back to a
     # 60s transient cooldown.
     "failure_reason",
+    "unsupported_models",
 })
 
 
@@ -2131,8 +2132,8 @@ class CredentialPool:
             return False
         return False
 
-    def select(self) -> Optional[PooledCredential]:
-        entry, pending_refresh = self._select_under_lock()
+    def select(self, *, model: Optional[str] = None) -> Optional[PooledCredential]:
+        entry, pending_refresh = self._select_under_lock(model=model)
         if pending_refresh:
             self._refresh_pending_entries(pending_refresh)
         if entry is not None:
@@ -2141,15 +2142,17 @@ class CredentialPool:
         # If no entry was available but we just refreshed some, re-select
         # now that the refreshed entries are back in the pool.
         if pending_refresh:
-            entry, _ = self._select_under_lock()
+            entry, _ = self._select_under_lock(model=model)
             if entry is not None:
                 self._unmatched_rotation_streak = 0
         return entry
 
-    def _select_under_lock(self) -> Tuple[Optional[PooledCredential], List[tuple]]:
+    def _select_under_lock(
+        self, *, model: Optional[str] = None,
+    ) -> Tuple[Optional[PooledCredential], List[tuple]]:
         """Run selection under the lock, returning entry + pending refreshes."""
         with self._lock:
-            return self._select_unlocked()
+            return self._select_unlocked(model=model)
 
     def _refresh_pending_entries(self, pending: List[tuple]) -> None:
         """Refresh deferred single-use-token entries outside the lock.
@@ -2169,6 +2172,7 @@ class CredentialPool:
 
     def _available_entries(
         self, *, clear_expired: bool = False, refresh: bool = False,
+        model: Optional[str] = None,
     ) -> Tuple[List[PooledCredential], List[tuple]]:
         """Return (available, pending_refresh) for entries not in cooldown.
 
@@ -2196,7 +2200,15 @@ class CredentialPool:
         sole_credential = sum(
             1 for e in self._entries if e.last_status != STATUS_DEAD
         ) <= 1
+        normalized_model = str(model or "").strip().casefold()
         for entry in self._entries:
+            unsupported_models = {
+                str(value).strip().casefold()
+                for value in (entry.extra.get("unsupported_models") or [])
+                if str(value).strip()
+            }
+            if normalized_model and normalized_model in unsupported_models:
+                continue
             # Borrowed credentials persist as metadata-only references and are
             # hydrated from their live source on load.  A stale duplicate row
             # can remain unhydrated; never lease or select it as an empty key.
@@ -2348,13 +2360,17 @@ class CredentialPool:
         self._last_no_entries_log_at = now
         logger.info("credential pool: no available entries (all exhausted or empty)")
 
-    def _select_unlocked(self, *, refresh: bool = True) -> Tuple[Optional[PooledCredential], List[tuple]]:
+    def _select_unlocked(
+        self, *, refresh: bool = True, model: Optional[str] = None,
+    ) -> Tuple[Optional[PooledCredential], List[tuple]]:
         """Select the best available credential entry.
 
         Returns ``(entry, pending_refresh)`` where *pending_refresh* contains
         single-use-token entries that must be refreshed outside the lock.
         """
-        available, pending_refresh = self._available_entries(clear_expired=True, refresh=refresh)
+        available, pending_refresh = self._available_entries(
+            clear_expired=True, refresh=refresh, model=model,
+        )
         if not available:
             self._current_id = None
             self._log_no_available_entries()
@@ -2390,6 +2406,72 @@ class CredentialPool:
         entry = available[0]
         self._current_id = entry.id
         return entry, pending_refresh
+
+    def mark_model_unsupported_and_rotate(
+        self,
+        *,
+        model: str,
+        api_key_hint: Optional[str] = None,
+        credential_id: Optional[str] = None,
+    ) -> Optional[PooledCredential]:
+        """Persist a credential-specific model exclusion and rotate.
+
+        A ChatGPT account can support Codex OAuth while rejecting one model.
+        Keep the account available for other models, but never select it for
+        the rejected model after a process restart.
+        """
+        normalized_model = str(model or "").strip().casefold()
+        if not normalized_model:
+            return None
+        with self._lock:
+            entry = None
+            if credential_id:
+                entry = next((e for e in self._entries if e.id == credential_id), None)
+                if entry is not None and api_key_hint and entry.runtime_api_key != api_key_hint:
+                    entry = next(
+                        (e for e in self._entries if e.runtime_api_key == api_key_hint),
+                        None,
+                    )
+            if entry is None and api_key_hint:
+                entry = next(
+                    (e for e in self._entries if e.runtime_api_key == api_key_hint),
+                    None,
+                )
+            if entry is None:
+                return None
+
+            failed_runtime_key = entry.runtime_api_key
+            changed = False
+            for candidate in list(self._entries):
+                if candidate.id != entry.id and (
+                    not failed_runtime_key or candidate.runtime_api_key != failed_runtime_key
+                ):
+                    continue
+                unsupported = {
+                    str(value).strip().casefold()
+                    for value in (candidate.extra.get("unsupported_models") or [])
+                    if str(value).strip()
+                }
+                if normalized_model in unsupported:
+                    continue
+                unsupported.add(normalized_model)
+                updated = replace(
+                    candidate,
+                    extra={
+                        **candidate.extra,
+                        "unsupported_models": sorted(unsupported),
+                    },
+                )
+                self._replace_entry(candidate, updated)
+                changed = True
+            if changed:
+                self._persist()
+            self._current_id = None
+            next_entry, _pending = self._select_unlocked(
+                refresh=False,
+                model=normalized_model,
+            )
+            return next_entry
 
     def peek(self) -> Optional[PooledCredential]:
         # Single lock acquisition for the whole read; call the unlocked

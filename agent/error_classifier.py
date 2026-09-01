@@ -61,6 +61,7 @@ class FailoverReason(enum.Enum):
 
     # Model / provider policy
     model_not_found = "model_not_found"  # 404 or invalid model — fallback to different model
+    credential_model_unsupported = "credential_model_unsupported"  # This account cannot serve the requested model — rotate credential
     provider_policy_blocked = "provider_policy_blocked"  # Aggregator (e.g. OpenRouter) blocked the only endpoint due to account data/privacy policy
     content_policy_blocked = "content_policy_blocked"  # Provider safety filter rejected this prompt — deterministic per-request, don't retry unchanged
 
@@ -1651,6 +1652,16 @@ def _classify_400(
     # verified") which could otherwise trip the context_overflow heuristics.
     # ``error_msg`` is lowercased upstream — match accordingly.
     error_code_lower = (error_code or "").lower()
+    if (
+        provider == "openai-codex"
+        and "model is not supported when using codex with a chatgpt account" in error_msg
+    ):
+        return result_fn(
+            FailoverReason.credential_model_unsupported,
+            retryable=False,
+            should_rotate_credential=True,
+            should_fallback=True,
+        )
     if (
         error_code_lower == "invalid_encrypted_content"
         or "invalid_encrypted_content" in error_msg

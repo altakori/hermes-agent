@@ -24,6 +24,66 @@ def _jwt_with_claims(claims: dict) -> str:
     return f"{_part({'alg': 'none', 'typ': 'JWT'})}.{_part(claims)}.sig"
 
 
+def test_model_unsupported_exclusion_persists_and_is_model_specific(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes"))
+    monkeypatch.setattr("hermes_cli.auth._import_codex_cli_tokens", lambda: None)
+    _write_auth_store(
+        tmp_path,
+        {
+            "version": 1,
+            "credential_pool": {
+                "openai-codex": [
+                    {
+                        "id": "cred-sol-unsupported",
+                        "label": "account-a",
+                        "auth_type": "oauth",
+                        "priority": 0,
+                        "source": "manual:device_code",
+                        "access_token": "token-a",
+                    },
+                    {
+                        "id": "cred-sol-supported",
+                        "label": "account-b",
+                        "auth_type": "oauth",
+                        "priority": 1,
+                        "source": "manual:device_code",
+                        "access_token": "token-b",
+                    },
+                ]
+            },
+        },
+    )
+
+    from agent.credential_pool import load_pool
+
+    pool = load_pool("openai-codex")
+    next_entry = pool.mark_model_unsupported_and_rotate(
+        model="GPT-5.6-SOL",
+        credential_id="cred-sol-unsupported",
+        api_key_hint="token-a",
+    )
+    assert next_entry is not None
+    assert next_entry.id == "cred-sol-supported"
+
+    reloaded = load_pool("openai-codex")
+    assert reloaded.select(model="gpt-5.6-sol").id == "cred-sol-supported"
+    luna_available, _pending = reloaded._available_entries(model="gpt-5.6-luna")
+    assert {entry.id for entry in luna_available} == {
+        "cred-sol-unsupported",
+        "cred-sol-supported",
+    }
+
+    stored = json.loads(
+        (tmp_path / "hermes" / "auth.json").read_text(encoding="utf-8")
+    )
+    excluded = next(
+        entry
+        for entry in stored["credential_pool"]["openai-codex"]
+        if entry["id"] == "cred-sol-unsupported"
+    )
+    assert excluded["unsupported_models"] == ["gpt-5.6-sol"]
+
+
 
 
 

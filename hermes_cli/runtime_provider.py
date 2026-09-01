@@ -2101,7 +2101,10 @@ def resolve_runtime_provider(
     except Exception:
         pool = None
     if pool and pool.has_credentials():
-        entry = pool.select()
+        pool_model = str(
+            target_model or model_cfg.get("default") or model_cfg.get("model") or ""
+        ).strip() or None
+        entry = pool.select(model=pool_model)
         pool_api_key = ""
         if entry is not None:
             pool_api_key = (

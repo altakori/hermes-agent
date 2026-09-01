@@ -1232,6 +1232,22 @@ def recover_with_credential_pool(
             )
         return False, has_retried_429
 
+    if effective_reason == FailoverReason.credential_model_unsupported:
+        next_entry = pool.mark_model_unsupported_and_rotate(
+            model=getattr(agent, "model", ""),
+            api_key_hint=_api_key_hint,
+            credential_id=_credential_id,
+        )
+        if next_entry is not None:
+            _ra().logger.info(
+                "Credential does not support model %s — persisted exclusion and rotated to %s",
+                getattr(agent, "model", ""),
+                getattr(next_entry, "id", "?"),
+            )
+            agent._swap_credential(next_entry)
+            return True, has_retried_429
+        return False, has_retried_429
+
     if effective_reason == FailoverReason.billing:
         rotate_status = status_code if status_code is not None else 402
         # Runtime credentials can be resolved by a separate pool instance,

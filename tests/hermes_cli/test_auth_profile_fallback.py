@@ -288,3 +288,25 @@ def test_write_pool_never_merges_cooldown_onto_reauthed_entry(classic_env):
     assert persisted["access_token"] == "sk-new"
     assert persisted.get("last_status") != "exhausted"
     assert persisted.get("last_error_code") is None
+
+
+def test_write_pool_unions_concurrent_model_exclusions(classic_env):
+    """A stale process must not erase another process's learned exclusion."""
+    from hermes_cli.auth import write_credential_pool
+
+    _write(classic_env / "auth.json", _make_auth_store(pool={
+        "openai-codex": [_pool_entry(
+            unsupported_models=["gpt-5.6-sol"],
+        )],
+    }))
+
+    write_credential_pool("openai-codex", [_pool_entry(
+        unsupported_models=["GPT-5.7-SOL"],
+    )])
+
+    data = json.loads((classic_env / "auth.json").read_text())
+    persisted = data["credential_pool"]["openai-codex"][0]
+    assert persisted["unsupported_models"] == [
+        "gpt-5.6-sol",
+        "gpt-5.7-sol",
+    ]

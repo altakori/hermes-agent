@@ -563,3 +563,32 @@ class TestFailureAttribution:
         failed = {e.id: e for e in pool.entries()}["cred-1"]
         assert failed.failure_reason != "billing"
 
+    def test_model_entitlement_marks_only_model_and_rotates(self, tmp_path, monkeypatch):
+        from agent.error_classifier import FailoverReason
+        from agent.agent_runtime_helpers import recover_with_credential_pool
+
+        pool = self._make_pool(
+            tmp_path, monkeypatch,
+            [self._entry(0, "key-a"), self._entry(1, "key-b")],
+        )
+        agent = self._agent(
+            pool,
+            failing_key="key-b",
+            credential_id="cred-1",
+        )
+        agent.model = "gpt-5.6-sol"
+
+        recovered, _ = recover_with_credential_pool(
+            agent,
+            status_code=400,
+            has_retried_429=False,
+            classified_reason=FailoverReason.credential_model_unsupported,
+        )
+
+        assert recovered is True
+        swapped = agent._swap_credential.call_args[0][0]
+        assert swapped.id == "cred-0"
+        failed = {entry.id: entry for entry in pool.entries()}["cred-1"]
+        assert failed.unsupported_models == ["gpt-5.6-sol"]
+        assert failed.last_status != "exhausted"
+

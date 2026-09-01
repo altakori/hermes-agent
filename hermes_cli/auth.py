@@ -1801,6 +1801,25 @@ def _merge_disk_cooldown_state(
         return entry
 
 
+def _merge_disk_persistent_entry_state(
+    entry: Dict[str, Any],
+    disk_entry: Optional[Dict[str, Any]],
+    provider_id: str,
+) -> Dict[str, Any]:
+    """Merge monotonic per-credential facts before last-writer-wins storage."""
+    merged_entry = dict(entry)
+    if isinstance(disk_entry, dict):
+        unsupported_models = {
+            str(value).strip().casefold()
+            for source in (entry, disk_entry)
+            for value in (source.get("unsupported_models") or [])
+            if str(value).strip()
+        }
+        if unsupported_models:
+            merged_entry["unsupported_models"] = sorted(unsupported_models)
+    return _merge_disk_cooldown_state(merged_entry, disk_entry, provider_id)
+
+
 def write_credential_pool(
     provider_id: str,
     entries: List[Dict[str, Any]],
@@ -1850,7 +1869,7 @@ def write_credential_pool(
             if isinstance(entry, dict) and entry.get("id")
         }
         merged: List[Dict[str, Any]] = [
-            _merge_disk_cooldown_state(
+            _merge_disk_persistent_entry_state(
                 entry, existing_by_id.get(entry.get("id")), provider_id
             )
             if isinstance(entry, dict)
