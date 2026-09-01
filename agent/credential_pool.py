@@ -39,7 +39,9 @@ from hermes_cli.auth import (
     _save_auth_store,
     _save_provider_state,
     _store_provider_state,
+    add_credential_model_exclusion,
     read_credential_pool,
+    read_credential_model_exclusions,
     write_credential_pool,
 )
 
@@ -187,6 +189,23 @@ _EXTRA_KEYS = frozenset({
     "failure_reason",
     "unsupported_models",
 })
+
+
+def normalize_credential_model_key(model: Any, provider: str) -> str:
+    """Canonicalize model IDs used by per-credential exclusions.
+
+    Codex models appear both as bare IDs (``gpt-5.6-sol``) and OpenAI-style
+    qualified IDs (``openai/gpt-5.6-sol``).  Those spellings must share one
+    exclusion or a rejected account is selected again by another surface.
+    """
+    value = str(model or "").strip().casefold()
+    if not value:
+        return ""
+    if str(provider or "").strip().casefold() == "openai-codex":
+        for prefix in ("openai-codex/", "openai/"):
+            if value.startswith(prefix):
+                return value[len(prefix):]
+    return value
 
 
 def _normalize_pool_auth_type(provider: str, token: Any, auth_type: Any) -> str:
@@ -2200,12 +2219,12 @@ class CredentialPool:
         sole_credential = sum(
             1 for e in self._entries if e.last_status != STATUS_DEAD
         ) <= 1
-        normalized_model = str(model or "").strip().casefold()
+        normalized_model = normalize_credential_model_key(model, self.provider)
         for entry in self._entries:
             unsupported_models = {
-                str(value).strip().casefold()
+                normalize_credential_model_key(value, self.provider)
                 for value in (entry.extra.get("unsupported_models") or [])
-                if str(value).strip()
+                if normalize_credential_model_key(value, self.provider)
             }
             if normalized_model and normalized_model in unsupported_models:
                 continue
@@ -2420,7 +2439,7 @@ class CredentialPool:
         Keep the account available for other models, but never select it for
         the rejected model after a process restart.
         """
-        normalized_model = str(model or "").strip().casefold()
+        normalized_model = normalize_credential_model_key(model, self.provider)
         if not normalized_model:
             return None
         with self._lock:
@@ -2448,9 +2467,9 @@ class CredentialPool:
                 ):
                     continue
                 unsupported = {
-                    str(value).strip().casefold()
+                    normalize_credential_model_key(value, self.provider)
                     for value in (candidate.extra.get("unsupported_models") or [])
-                    if str(value).strip()
+                    if normalize_credential_model_key(value, self.provider)
                 }
                 if normalized_model in unsupported:
                     continue
@@ -2463,6 +2482,11 @@ class CredentialPool:
                     },
                 )
                 self._replace_entry(candidate, updated)
+                add_credential_model_exclusion(
+                    self.provider,
+                    candidate.id,
+                    normalized_model,
+                )
                 changed = True
             if changed:
                 self._persist()
@@ -3585,6 +3609,21 @@ def _seed_custom_pool(pool_key: str, entries: List[PooledCredential]) -> Tuple[b
 def load_pool(provider: str) -> CredentialPool:
     provider = (provider or "").strip().lower()
     raw_entries = read_credential_pool(provider)
+    persistent_exclusions = read_credential_model_exclusions(provider)
+    for payload in raw_entries:
+        if not isinstance(payload, dict) or not payload.get("id"):
+            continue
+        credential_id = str(payload["id"])
+        exclusions = {
+            normalize_credential_model_key(value, provider)
+            for value in (
+                list(payload.get("unsupported_models") or [])
+                + list(persistent_exclusions.get(credential_id) or [])
+            )
+            if normalize_credential_model_key(value, provider)
+        }
+        if exclusions:
+            payload["unsupported_models"] = sorted(exclusions)
     disk_ids = {
         entry.get("id")
         for entry in raw_entries

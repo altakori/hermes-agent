@@ -1734,6 +1734,65 @@ def read_credential_pool(provider_id: Optional[str] = None) -> Dict[str, Any]:
     return list(global_entries) if isinstance(global_entries, list) else []
 
 
+_CREDENTIAL_MODEL_EXCLUSIONS_KEY = "credential_model_exclusions"
+
+
+def read_credential_model_exclusions(provider_id: str) -> Dict[str, List[str]]:
+    """Read monotonic model exclusions outside mutable pool rows.
+
+    Old or concurrent Hermes processes can rewrite credential-pool rows from a
+    stale in-memory snapshot.  Keeping learned capability facts in a top-level
+    registry lets those writers preserve the facts even when they do not know
+    the row field yet.
+    """
+    merged: Dict[str, set[str]] = {}
+    for store in (_load_global_auth_store(), _load_auth_store()):
+        root = store.get(_CREDENTIAL_MODEL_EXCLUSIONS_KEY) if store else None
+        provider_map = root.get(provider_id) if isinstance(root, dict) else None
+        if not isinstance(provider_map, dict):
+            continue
+        for credential_id, models in provider_map.items():
+            if not credential_id or not isinstance(models, list):
+                continue
+            bucket = merged.setdefault(str(credential_id), set())
+            bucket.update(str(model).strip().casefold() for model in models if str(model).strip())
+    return {credential_id: sorted(models) for credential_id, models in merged.items()}
+
+
+def add_credential_model_exclusion(
+    provider_id: str,
+    credential_id: str,
+    model: str,
+) -> bool:
+    """Atomically add one persistent per-credential model exclusion."""
+    provider_id = str(provider_id or "").strip().casefold()
+    credential_id = str(credential_id or "").strip()
+    model = str(model or "").strip().casefold()
+    if not provider_id or not credential_id or not model:
+        return False
+    with _auth_store_lock():
+        store = _load_auth_store()
+        root = store.get(_CREDENTIAL_MODEL_EXCLUSIONS_KEY)
+        if not isinstance(root, dict):
+            root = {}
+            store[_CREDENTIAL_MODEL_EXCLUSIONS_KEY] = root
+        provider_map = root.get(provider_id)
+        if not isinstance(provider_map, dict):
+            provider_map = {}
+            root[provider_id] = provider_map
+        models = {
+            str(value).strip().casefold()
+            for value in (provider_map.get(credential_id) or [])
+            if str(value).strip()
+        }
+        if model in models:
+            return False
+        models.add(model)
+        provider_map[credential_id] = sorted(models)
+        _save_auth_store(store)
+        return True
+
+
 _POOL_STATUS_FIELDS = (
     "last_status",
     "last_status_at",
@@ -1807,13 +1866,15 @@ def _merge_disk_persistent_entry_state(
     provider_id: str,
 ) -> Dict[str, Any]:
     """Merge monotonic per-credential facts before last-writer-wins storage."""
+    from agent.credential_pool import normalize_credential_model_key
+
     merged_entry = dict(entry)
     if isinstance(disk_entry, dict):
         unsupported_models = {
-            str(value).strip().casefold()
+            normalize_credential_model_key(value, provider_id)
             for source in (entry, disk_entry)
             for value in (source.get("unsupported_models") or [])
-            if str(value).strip()
+            if normalize_credential_model_key(value, provider_id)
         }
         if unsupported_models:
             merged_entry["unsupported_models"] = sorted(unsupported_models)

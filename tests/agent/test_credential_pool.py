@@ -84,6 +84,102 @@ def test_model_unsupported_exclusion_persists_and_is_model_specific(tmp_path, mo
     assert excluded["unsupported_models"] == ["gpt-5.6-sol"]
 
 
+def test_qualified_codex_model_uses_bare_model_exclusion(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes"))
+    monkeypatch.setattr("hermes_cli.auth._import_codex_cli_tokens", lambda: None)
+    _write_auth_store(
+        tmp_path,
+        {
+            "version": 1,
+            "credential_pool": {
+                "openai-codex": [
+                    {
+                        "id": "unsupported",
+                        "label": "account-a",
+                        "auth_type": "oauth",
+                        "priority": 0,
+                        "source": "manual:device_code",
+                        "access_token": "token-a",
+                        "unsupported_models": ["gpt-5.6-sol"],
+                    },
+                    {
+                        "id": "supported",
+                        "label": "account-b",
+                        "auth_type": "oauth",
+                        "priority": 1,
+                        "source": "manual:device_code",
+                        "access_token": "token-b",
+                    },
+                ]
+            },
+        },
+    )
+
+    from agent.credential_pool import load_pool
+
+    selected = load_pool("openai-codex").select(model="openai/gpt-5.6-sol")
+    assert selected is not None
+    assert selected.id == "supported"
+
+
+def test_top_level_model_exclusion_survives_stale_pool_writer(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes"))
+    monkeypatch.setattr("hermes_cli.auth._import_codex_cli_tokens", lambda: None)
+    original = {
+        "version": 1,
+        "credential_pool": {
+            "openai-codex": [
+                {
+                    "id": "unsupported",
+                    "label": "account-a",
+                    "auth_type": "oauth",
+                    "priority": 0,
+                    "source": "manual:device_code",
+                    "access_token": "token-a",
+                },
+                {
+                    "id": "supported",
+                    "label": "account-b",
+                    "auth_type": "oauth",
+                    "priority": 1,
+                    "source": "manual:device_code",
+                    "access_token": "token-b",
+                },
+            ]
+        },
+    }
+    _write_auth_store(tmp_path, original)
+
+    from agent.credential_pool import load_pool
+    from hermes_cli.auth import write_credential_pool
+
+    pool = load_pool("openai-codex")
+    pool.mark_model_unsupported_and_rotate(
+        model="gpt-5.6-sol",
+        credential_id="unsupported",
+        api_key_hint="token-a",
+    )
+
+    # Simulate an older process rewriting the rows from a snapshot that did
+    # not know about unsupported_models.  The top-level registry must survive.
+    write_credential_pool(
+        "openai-codex",
+        original["credential_pool"]["openai-codex"],
+    )
+
+    reloaded = load_pool("openai-codex")
+    selected = reloaded.select(model="openai/gpt-5.6-sol")
+    assert selected is not None
+    assert selected.id == "supported"
+
+    stored = json.loads(
+        (tmp_path / "hermes" / "auth.json").read_text(encoding="utf-8")
+    )
+    assert stored["credential_model_exclusions"]["openai-codex"]["unsupported"] == [
+        "gpt-5.6-sol"
+    ]
+
+
 
 
 

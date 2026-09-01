@@ -301,7 +301,7 @@ def test_write_pool_unions_concurrent_model_exclusions(classic_env):
     }))
 
     write_credential_pool("openai-codex", [_pool_entry(
-        unsupported_models=["GPT-5.7-SOL"],
+        unsupported_models=["OPENAI/GPT-5.7-SOL"],
     )])
 
     data = json.loads((classic_env / "auth.json").read_text())
