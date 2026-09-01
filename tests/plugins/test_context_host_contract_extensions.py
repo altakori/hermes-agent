@@ -133,6 +133,14 @@ def test_evaluator_reports_cache_token_latency_and_recovery_usage():
         "cached_input_tokens": 150,
         "cache_hit_ratio": 0.5,
         "cache_miss_turns": [1],
+        "per_turn": [
+            {"turn": 1, "input_tokens": 100, "cached_input_tokens": 0,
+             "cache_hit_ratio": 0.0, "cache_miss": True, "output_tokens": 12,
+             "latency_ms": 25.25, "recovery_calls": 1},
+            {"turn": 2, "input_tokens": 200, "cached_input_tokens": 150,
+             "cache_hit_ratio": 0.75, "cache_miss": False, "output_tokens": 8,
+             "latency_ms": 10.5, "recovery_calls": 0},
+        ],
         "output_tokens": 20,
         "latency_ms": 35.75,
         "recovery_calls": 1,
@@ -161,5 +169,26 @@ def test_evaluator_rejects_invalid_usage_evidence():
     )
     assert not invalid_latency.passed
     assert invalid_latency.failures == [
+        "invalid candidate usage: turn 1 contains an invalid latency"
+    ]
+
+    for malformed in ({}, 5):
+        invalid_container = evaluate_case(
+            messages,
+            messages,
+            candidate_usage=malformed,
+        )
+        assert not invalid_container.passed
+        assert invalid_container.failures == [
+            "invalid candidate usage: usage evidence must be an iterable of turn objects"
+        ]
+
+    huge_latency = evaluate_case(
+        messages,
+        messages,
+        candidate_usage=[{"latency_ms": 10**1000}],
+    )
+    assert not huge_latency.passed
+    assert huge_latency.failures == [
         "invalid candidate usage: turn 1 contains an invalid latency"
     ]

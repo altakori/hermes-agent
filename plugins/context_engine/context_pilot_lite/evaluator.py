@@ -53,13 +53,24 @@ def _usage(turns: Iterable[dict] | None) -> tuple[dict[str, Any], list[str]]:
         "cached_input_tokens": 0,
         "cache_hit_ratio": None,
         "cache_miss_turns": [],
+        "per_turn": [],
         "output_tokens": 0,
         "latency_ms": 0.0,
         "recovery_calls": 0,
     }
     errors = []
 
-    for index, turn in enumerate(turns or (), start=1):
+    if turns is None:
+        iterator = iter(())
+    elif isinstance(turns, (dict, str, bytes)):
+        return summary, ["usage evidence must be an iterable of turn objects"]
+    else:
+        try:
+            iterator = iter(turns)
+        except TypeError:
+            return summary, ["usage evidence must be an iterable of turn objects"]
+
+    for index, turn in enumerate(iterator, start=1):
         if not isinstance(turn, dict):
             errors.append(f"turn {index} is not an object")
             continue
@@ -72,13 +83,17 @@ def _usage(turns: Iterable[dict] | None) -> tuple[dict[str, Any], list[str]]:
             continue
         input_tokens, cached_tokens, output_tokens, recovery_calls = counts
         latency_value = turn.get("latency_ms", 0.0)
-        if (isinstance(latency_value, bool)
-                or not isinstance(latency_value, (int, float))
-                or latency_value < 0
-                or not math.isfinite(latency_value)):
+        try:
+            latency_ms = float(latency_value)
+        except (TypeError, ValueError, OverflowError):
             errors.append(f"turn {index} contains an invalid latency")
             continue
-        latency_ms = float(latency_value)
+        if (isinstance(latency_value, bool)
+                or not isinstance(latency_value, (int, float))
+                or latency_ms < 0
+                or not math.isfinite(latency_ms)):
+            errors.append(f"turn {index} contains an invalid latency")
+            continue
         if cached_tokens > input_tokens:
             errors.append(f"turn {index} cached input exceeds input tokens")
             continue
@@ -88,8 +103,19 @@ def _usage(turns: Iterable[dict] | None) -> tuple[dict[str, Any], list[str]]:
         summary["output_tokens"] += output_tokens
         summary["latency_ms"] += latency_ms
         summary["recovery_calls"] += recovery_calls
-        if input_tokens and not cached_tokens:
+        cache_miss = bool(input_tokens and not cached_tokens)
+        if cache_miss:
             summary["cache_miss_turns"].append(index)
+        summary["per_turn"].append({
+            "turn": index,
+            "input_tokens": input_tokens,
+            "cached_input_tokens": cached_tokens,
+            "cache_hit_ratio": cached_tokens / input_tokens if input_tokens else None,
+            "cache_miss": cache_miss,
+            "output_tokens": output_tokens,
+            "latency_ms": round(latency_ms, 3),
+            "recovery_calls": recovery_calls,
+        })
     total_input = summary["input_tokens"]
     if total_input:
         summary["cache_hit_ratio"] = summary["cached_input_tokens"] / total_input

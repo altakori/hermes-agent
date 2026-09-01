@@ -49,7 +49,7 @@ It wraps the built-in `ContextCompressor`, exposes one `context_manage` tool (`n
 
 Use `plugins/context_engine/context_pilot_lite/evaluator.py` for offline A/B gates. The evaluator fails candidates that lose required evidence without a verified recovery callback, regress task success, create dangling tool-call/result structure, or provide malformed usage evidence. Redacted previews are not treated as exact recovery.
 
-Each case can also supply `baseline_usage` and `candidate_usage` as per-turn records containing `input_tokens`, `cached_input_tokens`, `output_tokens`, `latency_ms`, and `recovery_calls`. The report aggregates total input/output tokens, cached-input ratio, one-based cache-miss turns, latency, and recovery calls. These measurements are observational rather than universal pass thresholds: compare them together with task success and verified recoverability, because a smaller context or higher cache ratio is not useful if the task regresses.
+Each case can also supply `baseline_usage` and `candidate_usage` as lists of per-turn records containing `input_tokens`, `cached_input_tokens`, `output_tokens`, `latency_ms`, and `recovery_calls`. The report preserves normalized per-turn measurements and aggregates total input/output tokens, cached-input ratio, one-based cache-miss turns, latency, and recovery calls. Malformed containers or values fail the evaluation instead of being treated as missing evidence. These measurements are observational rather than universal pass thresholds: compare them together with task success and verified recoverability, because a smaller context or higher cache ratio is not useful if the task regresses.
 
 ## Dual Compression System
 
