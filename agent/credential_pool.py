@@ -2820,6 +2820,11 @@ class CredentialPool:
             if index < 1 or index > len(self._entries):
                 return None
             removed = self._entries.pop(index - 1)
+            # Explicit user/dashboard removals must outlive stale Gateway
+            # snapshots and profile/global fallback.  Persist the shared
+            # tombstone before the remaining pool so a later stale writer is
+            # filtered even if this process is interrupted after this point.
+            auth_mod.disable_credential(self.provider, removed.id)
             self._entries = [
                 replace(entry, priority=new_priority)
                 for new_priority, entry in enumerate(self._entries)

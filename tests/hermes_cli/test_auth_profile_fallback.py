@@ -381,7 +381,34 @@ def test_disable_credential_tombstones_and_removes_profile_row(profile_env):
     persisted = json.loads((profile_env["profile"] / "auth.json").read_text())
     assert persisted["disabled_credential_ids"]["openai-codex"] == ["remove-me"]
     assert [row["id"] for row in persisted["credential_pool"]["openai-codex"]] == ["keep-me"]
+    global_persisted = json.loads((profile_env["global"] / "auth.json").read_text())
+    assert global_persisted["disabled_credential_ids"]["openai-codex"] == ["remove-me"]
     assert [row["id"] for row in read_credential_pool("openai-codex")] == ["keep-me"]
+
+
+def test_profile_disable_removes_same_id_from_global_pool(profile_env):
+    from hermes_cli.auth import disable_credential
+
+    _write(profile_env["global"] / "auth.json", _make_auth_store(pool={
+        "openai-codex": [
+            {"id": "shared", "label": "global-copy", "access_token": "global"},
+            {"id": "global-ok", "label": "global-ok", "access_token": "good"},
+        ],
+    }))
+    _write(profile_env["profile"] / "auth.json", _make_auth_store(pool={
+        "openai-codex": [
+            {"id": "shared", "label": "profile-copy", "access_token": "profile"},
+        ],
+    }))
+
+    assert disable_credential("openai-codex", "shared") is True
+    for root in (profile_env["global"], profile_env["profile"]):
+        persisted = json.loads((root / "auth.json").read_text())
+        assert persisted["disabled_credential_ids"]["openai-codex"] == ["shared"]
+        assert all(
+            row["id"] != "shared"
+            for row in persisted["credential_pool"]["openai-codex"]
+        )
 
 
 def test_global_tombstone_filters_profile_and_stale_writer(profile_env):

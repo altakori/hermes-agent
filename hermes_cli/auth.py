@@ -1801,31 +1801,43 @@ def disable_credential(provider_id: str, credential_id: str) -> bool:
     credential_id = str(credential_id or "").strip()
     if not provider_id or not credential_id:
         return False
-    with _auth_store_lock():
-        store = _load_auth_store()
-        root = store.get(_DISABLED_CREDENTIAL_IDS_KEY)
-        if not isinstance(root, dict):
-            root = {}
-            store[_DISABLED_CREDENTIAL_IDS_KEY] = root
-        disabled = {
-            str(value).strip()
-            for value in (root.get(provider_id) or [])
-            if str(value).strip()
-        }
-        changed = credential_id not in disabled
-        disabled.add(credential_id)
-        root[provider_id] = sorted(disabled)
-        pool = store.get("credential_pool")
-        if isinstance(pool, dict) and isinstance(pool.get(provider_id), list):
-            before = len(pool[provider_id])
-            pool[provider_id] = [
-                entry for entry in pool[provider_id]
-                if not isinstance(entry, dict)
-                or str(entry.get("id") or "").strip() != credential_id
-            ]
-            changed = changed or len(pool[provider_id]) != before
-        _save_auth_store(store)
-        return changed
+    active_path = _auth_file_path()
+    global_path = _global_auth_file_path()
+    # A tombstone is shared control state, not a profile-local credential.
+    # Write it through to both stores so neither a stale profile Gateway nor a
+    # stale global process can resurrect the removed account.  Locks are taken
+    # one at a time in deterministic path order; no cross-store nested lock.
+    target_paths = {active_path}
+    if global_path is not None:
+        target_paths.add(global_path)
+    changed = False
+    for target_path in sorted(target_paths, key=lambda value: str(value).casefold()):
+        with _auth_store_lock(target_path=target_path):
+            store = _load_auth_store(target_path)
+            root = store.get(_DISABLED_CREDENTIAL_IDS_KEY)
+            if not isinstance(root, dict):
+                root = {}
+                store[_DISABLED_CREDENTIAL_IDS_KEY] = root
+            disabled = {
+                str(value).strip()
+                for value in (root.get(provider_id) or [])
+                if str(value).strip()
+            }
+            target_changed = credential_id not in disabled
+            disabled.add(credential_id)
+            root[provider_id] = sorted(disabled)
+            pool = store.get("credential_pool")
+            if isinstance(pool, dict) and isinstance(pool.get(provider_id), list):
+                before = len(pool[provider_id])
+                pool[provider_id] = [
+                    entry for entry in pool[provider_id]
+                    if not isinstance(entry, dict)
+                    or str(entry.get("id") or "").strip() != credential_id
+                ]
+                target_changed = target_changed or len(pool[provider_id]) != before
+            _save_auth_store(store, target_path=target_path)
+            changed = changed or target_changed
+    return changed
 
 
 def read_credential_pool(provider_id: Optional[str] = None) -> Dict[str, Any]:

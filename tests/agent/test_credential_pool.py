@@ -2129,6 +2129,25 @@ def _fresh_entry(pool):
     return dc_replace(pool.entries()[0], id="cred-new")
 
 
+def test_remove_index_persists_shared_tombstone(tmp_path, monkeypatch):
+    import agent.credential_pool as credential_pool_mod
+
+    pool = _load_two_ok_pool(tmp_path, monkeypatch)
+    calls = []
+    monkeypatch.setattr(
+        credential_pool_mod.auth_mod,
+        "disable_credential",
+        lambda provider, credential_id: calls.append((provider, credential_id)) or True,
+    )
+
+    removed = pool.remove_index(1)
+
+    assert removed is not None
+    assert removed.id == "cred-1"
+    assert calls == [("anthropic", "cred-1")]
+    assert [entry.id for entry in pool.entries()] == ["cred-2"]
+
+
 class TestCredentialPoolQueryLocking:
     """Public pool-state methods must run under ``self._lock``.
 
