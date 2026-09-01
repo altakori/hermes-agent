@@ -7,9 +7,12 @@ forwards to the real host:
 * ``<root>/<host>/<path>`` exists -> serve it. This is how the sandbox answers
   the canonical install URL with the installer under test, so the payload can
   run the true ``curl -fsSL https://…/install.sh | bash`` one-liner.
-* otherwise -> forward upstream, verifying against the real CA bundle. The
-  sandbox is isolated from the *host*, not from the internet: a real install
-  still has to reach PyPI and npm.
+* an HTTPS host with no fixtures -> pass its CONNECT tunnel through untouched.
+  This avoids terminating npm's many concurrent TLS connections in the small
+  fixture proxy.
+* any other request -> forward upstream, verifying against the real CA bundle.
+  The sandbox is isolated from the *host*, not from the internet: a real
+  install still has to reach PyPI and npm.
 
 HTTPS is intercepted by minting a per-host certificate from the sandbox's own
 throwaway CA, which the payload trusts via CURL_CA_BUNDLE / SSL_CERT_FILE.
@@ -19,6 +22,7 @@ Usage: proxy.py <fixture-root> <certs-dir> <real-ca-bundle>
 
 import os
 import pathlib
+import select
 import socket
 import ssl
 import subprocess
@@ -150,6 +154,30 @@ def relay(source, destination):
         destination.sendall(chunk)
 
 
+def tunnel_https(conn, host, port):
+    """Pass through HTTPS hosts that have no local fixtures.
+
+    npm opens many concurrent, reusable TLS connections. Terminating all of
+    them in this deliberately small fixture proxy is both unnecessary and can
+    stall npm's connection pool. Only fixture hosts need interception; every
+    other host can use a normal CONNECT tunnel and its public certificate.
+    """
+    with socket.create_connection((host, port), timeout=UPSTREAM_TIMEOUT_SECONDS) as upstream:
+        conn.sendall(b'HTTP/1.1 200 Connection Established\r\n\r\n')
+        peers = {conn: upstream, upstream: conn}
+        while True:
+            readable, _, _ = select.select(
+                tuple(peers), (), (), UPSTREAM_TIMEOUT_SECONDS
+            )
+            if not readable:
+                return
+            for source in readable:
+                chunk = source.recv(MAX_REQUEST_BYTES)
+                if not chunk:
+                    return
+                peers[source].sendall(chunk)
+
+
 def forward_https(conn, host, port, request):
     context = ssl.create_default_context(cafile=str(REAL_CA))
     with socket.create_connection((host, port), timeout=UPSTREAM_TIMEOUT_SECONDS) as raw:
@@ -169,9 +197,12 @@ def forward_http(conn, host, port, request, target):
 
 
 def handle_connect(conn, target):
-    """Intercept a CONNECT tunnel, terminating TLS with a minted cert."""
+    """Tunnel ordinary HTTPS; intercept only hosts that have fixtures."""
     host, _, port_text = target.rpartition(':')
     port = int(port_text or '443')
+    if not (ROOT / host).is_dir():
+        tunnel_https(conn, host, port)
+        return
     conn.sendall(b'HTTP/1.1 200 Connection Established\r\n\r\n')
     cert, key = cert_for(host)
     context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)

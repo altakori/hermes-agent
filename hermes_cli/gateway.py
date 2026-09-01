@@ -5,7 +5,6 @@ Handles: hermes gateway [run|start|stop|restart|status|install|uninstall|setup]
 """
 
 import asyncio
-from hermes_cli.cli_output import line_input
 import json
 import logging
 import os
@@ -7515,6 +7514,14 @@ def _setup_qqbot():
 def _setup_signal():
     """Interactive setup for Signal messenger."""
     import shutil
+
+    # Keep this import local.  ``hermes update`` from releases predating
+    # ``line_input`` can import the newly checked-out gateway module while its
+    # process still has the old ``hermes_cli.cli_output`` cached.  A module-
+    # level import therefore aborts the gateway restart phase even though
+    # Signal setup is unrelated.  Fresh gateway processes still resolve the
+    # helper normally when this wizard is actually invoked.
+    from hermes_cli.cli_output import line_input
 
     print()
     print(color("  ─── 📡 Signal Setup ───", Colors.CYAN))
